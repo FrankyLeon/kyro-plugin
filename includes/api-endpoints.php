@@ -626,7 +626,7 @@ function scp_rest_wallet_deposit( $request ) {
     $currency = strtoupper( $request->get_param( 'currency' ) ?: 'USD' );
     $order_id = $request->get_param( 'order_id' );
     $method   = strtolower( sanitize_text_field( $request->get_param( 'method' ) ?: 'card' ) );
-    if ( ! in_array( $method, [ 'card', 'paypal', 'crypto' ], true ) ) {
+    if ( ! in_array( $method, [ 'bank', 'card', 'paypal', 'crypto' ], true ) ) {
         $method = 'card';
     }
 

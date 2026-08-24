@@ -20,6 +20,15 @@ function scp_add_admin_menu() {
     // Add submenu to our main menu
     add_submenu_page(
         'scorpioplay',
+        'Deposit Destinations',
+        'Deposit Destinations',
+        'manage_options',
+        'scp-deposit-destinations',
+        'scp_render_deposit_destinations_page'
+    );
+
+    add_submenu_page(
+        'scorpioplay',
         'Game Manager',
         'Game Manager',
         'manage_options',
@@ -103,6 +112,10 @@ function scp_settings_page() {
                     <td><input type="password" name="scp_stripe_secret_key" value="<?php echo esc_attr( get_option('scp_stripe_secret_key', '') ); ?>" class="regular-text" /></td>
                 </tr>
             </table>
+            <p class="description">
+                Bank, crypto, and PayPal receiving details are managed on
+                <a href="<?php echo esc_url( admin_url( 'admin.php?page=scp-deposit-destinations' ) ); ?>">Deposit Destinations</a>.
+            </p>
             <?php submit_button(); ?>
         </form>
 

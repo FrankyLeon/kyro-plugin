@@ -21,6 +21,7 @@ require_once SCP_PLUGIN_DIR . 'includes/wallet.php';
 
 require_once SCP_PLUGIN_DIR . 'includes/transactions.php';
 require_once SCP_PLUGIN_DIR . 'includes/api-endpoints.php';
+require_once SCP_PLUGIN_DIR . 'includes/deposit-destinations.php';
 
 wp_enqueue_script( 'stripe-js', 'https://js.stripe.com/v3/', [], null, true );
 wp_add_inline_script( 'stripe-js', 'const stripe = Stripe("' . esc_js( get_option('scp_stripe_publishable_key', '') ) . '");' );
