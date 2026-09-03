@@ -104,15 +104,19 @@ class SCP_API_Client {
         return $this->request( '/v1/game/list/' . rawurlencode( $provider_id ), 'GET' );
     }
 
-    public function launch_game( $playerExternalId, $providerId, $gameCode, $language = 'en', $currency = 'USD', $rtp = 0 ) {
-        return $this->request( '/v1/game/launch', 'POST', array(
+    public function launch_game( $playerExternalId, $providerId, $gameCode, $language = 'en', $currency = 'USD', $rtp = 0, $returnUrl = '' ) {
+        $payload = array(
             'playerExternalId' => $playerExternalId,
             'providerId'       => $providerId,
             'gameCode'         => $gameCode,
             'language'         => $language,
             'currency'         => $currency,
             'rtp'              => $rtp,
-        ));
+        );
+        if ( ! empty( $returnUrl ) ) {
+            $payload['returnUrl'] = $returnUrl;
+        }
+        return $this->request( '/v1/game/launch', 'POST', $payload );
     }
 
     public function kick_game( $playerExternalId, $sessionId = '', $providerId = '', $gameCode = '', $reason = '' ) {

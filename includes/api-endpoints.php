@@ -58,17 +58,40 @@ function scp_register_rest_routes() {
         ],
     ] );
 
+    // Slug-based launch — matches FE client: POST /games/{slug}/launch { returnUrl, playerExternalId }.
+    register_rest_route( 'scp/v1', '/games/(?P<slug>[\w\-]+)/launch', [
+        'methods'             => 'POST',
+        'callback'            => 'scp_rest_game_launch_by_slug',
+        'permission_callback' => '__return_true',
+        'args'                => [
+            'slug'             => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ],
+            'playerExternalId' => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'player_id'        => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'returnUrl'        => [ 'required' => false, 'sanitize_callback' => 'esc_url_raw' ],
+            'return_url'       => [ 'required' => false, 'sanitize_callback' => 'esc_url_raw' ],
+            'language'         => [ 'required' => false, 'default' => 'en', 'sanitize_callback' => 'sanitize_text_field' ],
+            'currency'         => [ 'required' => false, 'default' => 'USD', 'sanitize_callback' => 'sanitize_text_field' ],
+            'rtp'              => [ 'required' => false, 'default' => 0, 'sanitize_callback' => 'sanitize_text_field' ],
+        ],
+    ] );
+
+    // Explicit launch — providerId + gameCode in body (legacy / direct API clients).
     register_rest_route( 'scp/v1', '/game/launch', [
         'methods'             => 'POST',
         'callback'            => 'scp_rest_game_launch',
         'permission_callback' => '__return_true',
         'args'                => [
-            'provider_id' => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ],
-            'game_code'   => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ],
-            'language'    => [ 'required' => false, 'default' => 'en', 'sanitize_callback' => 'sanitize_text_field' ],
-            'currency'    => [ 'required' => false, 'default' => 'USD', 'sanitize_callback' => 'sanitize_text_field' ],
-            'rtp'         => [ 'required' => false, 'default' => 0, 'sanitize_callback' => 'sanitize_text_field' ],
-            'player_id'   => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'providerId'       => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'provider_id'      => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'gameCode'         => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'game_code'        => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'playerExternalId' => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'player_id'        => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'language'         => [ 'required' => false, 'default' => 'en', 'sanitize_callback' => 'sanitize_text_field' ],
+            'currency'         => [ 'required' => false, 'default' => 'USD', 'sanitize_callback' => 'sanitize_text_field' ],
+            'returnUrl'        => [ 'required' => false, 'sanitize_callback' => 'esc_url_raw' ],
+            'return_url'       => [ 'required' => false, 'sanitize_callback' => 'esc_url_raw' ],
+            'rtp'              => [ 'required' => false, 'default' => 0, 'sanitize_callback' => 'sanitize_text_field' ],
         ],
     ] );
 
@@ -518,8 +541,72 @@ function scp_rest_game_list( $request ) {
     return rest_ensure_response( $response );
 }
 
+/**
+ * Resolve a request param from registered REST args, then JSON body, then aliases.
+ *
+ * @param WP_REST_Request $request
+ * @param string[]        $keys Preferred key first.
+ * @return mixed|null
+ */
+function scp_rest_param( $request, array $keys ) {
+    $json = $request->get_json_params();
+    if ( ! is_array( $json ) ) {
+        $json = [];
+    }
+
+    foreach ( $keys as $key ) {
+        $value = $request->get_param( $key );
+        if ( $value !== null && $value !== '' ) {
+            return $value;
+        }
+        if ( array_key_exists( $key, $json ) && $json[ $key ] !== null && $json[ $key ] !== '' ) {
+            return $json[ $key ];
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Parse FE game slug `{providerId}-{gameCode}` (e.g. 16-16-619 → provider 16, code 16-619).
+ *
+ * @param string $slug
+ * @return array{provider_id:string,game_code:string}|WP_Error
+ */
+function scp_parse_game_slug( $slug ) {
+    $slug = strtolower( trim( (string) $slug ) );
+    $dash = strpos( $slug, '-' );
+    if ( $dash === false || $dash < 1 ) {
+        return new WP_Error( 'scp_game_invalid_slug', 'Game not found.', [ 'status' => 404 ] );
+    }
+
+    $provider_id = substr( $slug, 0, $dash );
+    $game_code   = substr( $slug, $dash + 1 );
+
+    if ( $provider_id === '' || $game_code === '' || ! ctype_digit( $provider_id ) || (int) $provider_id < 1 ) {
+        return new WP_Error( 'scp_game_invalid_slug', 'Game not found.', [ 'status' => 404 ] );
+    }
+
+    return [
+        'provider_id' => $provider_id,
+        'game_code'   => $game_code,
+    ];
+}
+
+function scp_rest_game_launch_by_slug( $request ) {
+    $parsed = scp_parse_game_slug( $request->get_param( 'slug' ) );
+    if ( is_wp_error( $parsed ) ) {
+        return $parsed;
+    }
+
+    $request->set_param( 'providerId', $parsed['provider_id'] );
+    $request->set_param( 'gameCode', $parsed['game_code'] );
+
+    return scp_rest_game_launch( $request );
+}
+
 function scp_rest_game_launch( $request ) {
-    $player_id = $request->get_param( 'player_id' );
+    $player_id = scp_rest_param( $request, [ 'playerExternalId', 'player_id' ] );
     if ( empty( $player_id ) && is_user_logged_in() ) {
         $user = wp_get_current_user();
         $player_id = $user->user_login;
@@ -529,21 +616,37 @@ function scp_rest_game_launch( $request ) {
         return new WP_Error( 'scp_game_launch_missing_user', 'Player ID is required.', [ 'status' => 403 ] );
     }
 
-    $provider_id = $request->get_param( 'provider_id' );
-    $game_code   = $request->get_param( 'game_code' );
-    $language    = $request->get_param( 'language' );
-    $currency    = $request->get_param( 'currency' );
-    $rtp         = $request->get_param( 'rtp' );
+    $provider_id = scp_rest_param( $request, [ 'providerId', 'provider_id' ] );
+    $game_code   = scp_rest_param( $request, [ 'gameCode', 'game_code' ] );
+
+    if ( empty( $provider_id ) || empty( $game_code ) ) {
+        return new WP_Error(
+            'scp_game_launch_missing_params',
+            'Missing parameter(s): providerId, gameCode',
+            [ 'status' => 400 ]
+        );
+    }
+
+    $language   = scp_rest_param( $request, [ 'language' ] ) ?: 'en';
+    $currency   = scp_rest_param( $request, [ 'currency' ] ) ?: 'USD';
+    $rtp        = scp_rest_param( $request, [ 'rtp' ] );
+    if ( $rtp === null || $rtp === '' ) {
+        $rtp = 0;
+    }
+    $return_url = scp_rest_param( $request, [ 'returnUrl', 'return_url' ] );
 
     $api = new SCP_API_Client();
     $payload = [
         'playerExternalId' => $player_id,
-        'providerId'      => $provider_id,
-        'gameCode'        => $game_code,
-        'language'        => $language,
-        'currency'        => $currency,
-        'rtp'             => $rtp,
+        'providerId'       => $provider_id,
+        'gameCode'         => $game_code,
+        'language'         => $language,
+        'currency'         => $currency,
+        'rtp'              => $rtp,
     ];
+    if ( ! empty( $return_url ) ) {
+        $payload['returnUrl'] = $return_url;
+    }
 
     $result = $api->request( '/v1/game/launch', 'POST', $payload );
     if ( empty( $result['success'] ) ) {
@@ -551,11 +654,16 @@ function scp_rest_game_launch( $request ) {
     }
 
     $data = $result['data'] ?? [];
-    if ( empty( $data['url'] ) ) {
+    $launch_url = $data['url'] ?? $data['gameUrl'] ?? '';
+    if ( empty( $launch_url ) ) {
         return new WP_Error( 'scp_game_launch_no_url', 'Game launch succeeded but no URL was returned.', [ 'status' => 500 ] );
     }
 
-    return rest_ensure_response( [ 'url' => $data['url'], 'data' => $data ] );
+    // Flat response for FE mapper (avoid nesting under `data`, which parseApiResponse unwraps).
+    return rest_ensure_response( [
+        'url'     => $launch_url,
+        'gameUrl' => $launch_url,
+    ] );
 }
 
 function scp_rest_game_kick( $request ) {
@@ -901,7 +1009,11 @@ add_action( 'wp_ajax_scp_game_list', function() {
 } );
 add_action( 'wp_ajax_scp_game_launch', function() {
     $request = new WP_REST_Request( 'POST', '/scp/v1/game/launch' );
-    foreach ( [ 'provider_id', 'game_code', 'language', 'currency', 'rtp' ] as $param ) {
+    $request->set_param( 'providerId', sanitize_text_field( $_POST['providerId'] ?? $_POST['provider_id'] ?? '' ) );
+    $request->set_param( 'gameCode', sanitize_text_field( $_POST['gameCode'] ?? $_POST['game_code'] ?? '' ) );
+    $request->set_param( 'playerExternalId', sanitize_text_field( $_POST['playerExternalId'] ?? $_POST['player_id'] ?? '' ) );
+    $request->set_param( 'returnUrl', esc_url_raw( $_POST['returnUrl'] ?? $_POST['return_url'] ?? '' ) );
+    foreach ( [ 'language', 'currency', 'rtp' ] as $param ) {
         $request->set_param( $param, sanitize_text_field( $_POST[ $param ] ?? '' ) );
     }
     scp_api_ajax_response( function() use ( $request ) { return scp_rest_game_launch( $request ); } );
