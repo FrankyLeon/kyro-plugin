@@ -84,7 +84,7 @@ function scp_register_rest_routes() {
             'return_url'       => [ 'required' => false, 'sanitize_callback' => 'esc_url_raw' ],
             'language'         => [ 'required' => false, 'default' => 'en', 'sanitize_callback' => 'sanitize_text_field' ],
             'currency'         => [ 'required' => false, 'default' => 'USD', 'sanitize_callback' => 'sanitize_text_field' ],
-            'rtp'              => [ 'required' => false, 'default' => 0, 'sanitize_callback' => 'sanitize_text_field' ],
+            'rtp'              => [ 'required' => false, 'default' => 0, 'sanitize_callback' => 'absint' ],
         ],
     ] );
 
@@ -94,8 +94,8 @@ function scp_register_rest_routes() {
         'callback'            => 'scp_rest_game_launch',
         'permission_callback' => '__return_true',
         'args'                => [
-            'providerId'       => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
-            'provider_id'      => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'providerId'       => [ 'required' => false, 'sanitize_callback' => 'absint' ],
+            'provider_id'      => [ 'required' => false, 'sanitize_callback' => 'absint' ],
             'gameCode'         => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
             'game_code'        => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
             'playerExternalId' => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
@@ -104,7 +104,7 @@ function scp_register_rest_routes() {
             'currency'         => [ 'required' => false, 'default' => 'USD', 'sanitize_callback' => 'sanitize_text_field' ],
             'returnUrl'        => [ 'required' => false, 'sanitize_callback' => 'esc_url_raw' ],
             'return_url'       => [ 'required' => false, 'sanitize_callback' => 'esc_url_raw' ],
-            'rtp'              => [ 'required' => false, 'default' => 0, 'sanitize_callback' => 'sanitize_text_field' ],
+            'rtp'              => [ 'required' => false, 'default' => 0, 'sanitize_callback' => 'absint' ],
         ],
     ] );
 
@@ -556,26 +556,10 @@ function scp_format_lobby_game( $game ) {
         'gameType'      => get_post_meta( $game->ID, 'scp_game_type', true ) ?: '',
         'inMaintenance' => (bool) get_post_meta( $game->ID, 'scp_game_in_maintenance', true ),
         'status'        => $enabled ? '1' : '0',
-        'rating'        => scp_get_game_rating( $game->ID ),
         'providerId'    => get_post_meta( $game->ID, 'scp_game_provider_id', true ) ?: '',
         'providerName'  => get_post_meta( $game->ID, 'scp_game_provider_name', true ) ?: '',
         'description'   => $game->post_content ?: '',
     ];
-}
-
-function scp_catalog_posts_clauses( $clauses, $query ) {
-    if ( ! $query->get( 'scp_catalog_rating_sort' ) ) {
-        return $clauses;
-    }
-
-    global $wpdb;
-    $clauses['join'] .= $wpdb->prepare(
-        " LEFT JOIN {$wpdb->postmeta} AS scp_rating ON ({$wpdb->posts}.ID = scp_rating.post_id AND scp_rating.meta_key = %s) ",
-        'scp_game_rating'
-    );
-    $clauses['orderby'] = "CAST(COALESCE(scp_rating.meta_value, '0') AS DECIMAL(4,1)) DESC, {$wpdb->posts}.post_title ASC";
-
-    return $clauses;
 }
 
 function scp_rest_game_catalog( $request ) {
@@ -627,16 +611,12 @@ function scp_rest_game_catalog( $request ) {
     if ( $sort === 'za' ) {
         $args['orderby'] = 'title';
         $args['order']   = 'DESC';
-    } elseif ( $sort === 'az' ) {
+    } else {
         $args['orderby'] = 'title';
         $args['order']   = 'ASC';
-    } else {
-        $args['scp_catalog_rating_sort'] = true;
     }
 
-    add_filter( 'posts_clauses', 'scp_catalog_posts_clauses', 10, 2 );
     $query = new WP_Query( $args );
-    remove_filter( 'posts_clauses', 'scp_catalog_posts_clauses', 10 );
 
     $items = [];
     foreach ( $query->posts as $game ) {
@@ -744,19 +724,15 @@ function scp_rest_game_launch( $request ) {
     $return_url = scp_rest_param( $request, [ 'returnUrl', 'return_url' ] );
 
     $api = new SCP_API_Client();
-    $payload = [
-        'playerExternalId' => $player_id,
-        'providerId'       => $provider_id,
-        'gameCode'         => $game_code,
-        'language'         => $language,
-        'currency'         => $currency,
-        'rtp'              => $rtp,
-    ];
-    if ( ! empty( $return_url ) ) {
-        $payload['returnUrl'] = $return_url;
-    }
-
-    $result = $api->request( '/v1/game/launch', 'POST', $payload );
+    $result = $api->launch_game(
+        $player_id,
+        $provider_id,
+        $game_code,
+        $language,
+        $currency,
+        $rtp,
+        $return_url ?: ''
+    );
     if ( empty( $result['success'] ) ) {
         return new WP_Error( 'scp_game_launch_error', $result['message'] ?? 'Unable to launch game', [ 'status' => 500 ] );
     }

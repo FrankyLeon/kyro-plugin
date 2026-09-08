@@ -76,30 +76,6 @@ function scp_register_game_cpt() {
         'type'          => 'boolean',
         'default'       => false,
     ]);
-    register_post_meta( 'scp_game', 'scp_game_rating', [
-        'show_in_rest'  => true,
-        'single'        => true,
-        'type'          => 'number',
-        'default'       => 0,
-        'description'   => 'Game rating from 0 to 5',
-    ]);
-}
-
-function scp_normalize_game_rating( $value ) {
-    if ( $value === '' || $value === null || false === $value ) {
-        return 0.0;
-    }
-
-    $rating = floatval( $value );
-    if ( ! is_finite( $rating ) ) {
-        return 0.0;
-    }
-
-    return max( 0, min( 5, round( $rating, 1 ) ) );
-}
-
-function scp_get_game_rating( $post_id ) {
-    return scp_normalize_game_rating( get_post_meta( $post_id, 'scp_game_rating', true ) );
 }
 
 
