@@ -640,26 +640,94 @@ function scp_set_featured_image_from_url( $post_id, $url ) {
 
 
 function scp_logs_page() {
-    global $wpdb;
-    $table = $wpdb->prefix . 'scp_transactions';
-    $logs = $wpdb->get_results( "SELECT * FROM $table ORDER BY created_at DESC LIMIT 200" );
-    echo '<div class="wrap"><h1>Transaction Log</h1>';
+    $defaults = scp_transaction_default_times();
+    $filters  = [
+        'operator'         => sanitize_text_field( wp_unslash( $_GET['operator'] ?? '' ) ),
+        'transType'        => sanitize_text_field( wp_unslash( $_GET['transType'] ?? '' ) ),
+        'startTime'        => sanitize_text_field( wp_unslash( $_GET['startTime'] ?? $defaults['startTime'] ) ),
+        'endTime'          => sanitize_text_field( wp_unslash( $_GET['endTime'] ?? $defaults['endTime'] ) ),
+        'playerExternalId' => sanitize_text_field( wp_unslash( $_GET['playerExternalId'] ?? '' ) ),
+        'roundId'          => sanitize_text_field( wp_unslash( $_GET['roundId'] ?? '' ) ),
+        'offset'           => max( 0, absint( $_GET['offset'] ?? 0 ) ),
+        'limit'            => 20,
+    ];
+
+    $result = scp_fetch_transaction_list( $filters );
+    $list   = $result['list'] ?? [];
+    $total  = (int) ( $result['total'] ?? 0 );
+    $offset = (int) ( $result['offset'] ?? $filters['offset'] );
+
+    $start_local = $filters['startTime'] ? str_replace( ' ', 'T', substr( $filters['startTime'], 0, 16 ) ) : '';
+    $end_local   = $filters['endTime'] ? str_replace( ' ', 'T', substr( $filters['endTime'], 0, 16 ) ) : '';
+
+    echo '<div class="wrap"><h1>Transaction History</h1>';
+
+    if ( empty( $result['success'] ) ) {
+        echo '<div class="notice notice-error"><p>' . esc_html( $result['message'] ?? 'Unable to fetch transactions.' ) . '</p></div>';
+    }
+
+    echo '<form method="get" class="scp-txn-filters" style="background:#fff;border:1px solid #c3c4c7;padding:16px;margin:16px 0;">';
+    echo '<input type="hidden" name="page" value="scp-logs" />';
+    echo '<div style="display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:12px;align-items:end;">';
+    echo '<label>Operator<br><input type="text" name="operator" class="regular-text" value="' . esc_attr( $filters['operator'] ) . '" /></label>';
+    echo '<label>Transaction Type<br><select name="transType"><option value="">All</option>';
+    foreach ( [ '1' => 'Bet', '2' => 'Win', '3' => 'Refund' ] as $value => $label ) {
+        echo '<option value="' . esc_attr( $value ) . '"' . selected( $filters['transType'], $value, false ) . '>' . esc_html( $label ) . '</option>';
+    }
+    echo '</select></label>';
+    echo '<label>Start Time<br><input type="datetime-local" name="startTime" value="' . esc_attr( $start_local ) . '" /></label>';
+    echo '<label>End Time<br><input type="datetime-local" name="endTime" value="' . esc_attr( $end_local ) . '" /></label>';
+    echo '<label>Player External ID<br><input type="text" name="playerExternalId" class="regular-text" value="' . esc_attr( $filters['playerExternalId'] ) . '" /></label>';
+    echo '<label>Round ID<br><input type="text" name="roundId" class="regular-text" value="' . esc_attr( $filters['roundId'] ) . '" /></label>';
+    echo '<p><button type="submit" class="button button-primary">Search</button></p>';
+    echo '</div></form>';
+
+    echo '<p>Showing ' . esc_html( (string) count( $list ) ) . ' of ' . esc_html( (string) $total ) . ' transactions.</p>';
     echo '<table class="wp-list-table widefat fixed striped">';
-    echo '<thead><tr><th>ID</th><th>User</th><th>Type</th><th>Amount</th><th>Status</th><th>Gateway Txn</th><th>SCP Txn</th><th>Date</th></tr></thead><tbody>';
-    foreach ( $logs as $row ) {
-        $user = get_userdata( $row->user_id );
+    echo '<thead><tr>';
+    echo '<th>ID</th><th>Player</th><th>Round</th><th>Provider</th><th>Game</th><th>Type</th>';
+    echo '<th>Amount</th><th>Pre Balance</th><th>Current Balance</th><th>Status</th><th>Created At</th>';
+    echo '</tr></thead><tbody>';
+
+    if ( empty( $list ) ) {
+        echo '<tr><td colspan="11">No transactions found for this range.</td></tr>';
+    }
+
+    foreach ( $list as $row ) {
+        $type_color   = $row['type'] === 'Win' ? '#166534' : ( $row['type'] === 'Bet' ? '#9a3412' : '#334155' );
+        $type_bg      = $row['type'] === 'Win' ? '#dcfce7' : ( $row['type'] === 'Bet' ? '#ffedd5' : '#e2e8f0' );
+        $status_color = $row['status'] === 'Success' ? '#166534' : '#991b1b';
+        $status_bg    = $row['status'] === 'Success' ? '#dcfce7' : '#fee2e2';
+        $created      = $row['createdAt'] ? wp_date( 'd M Y g:i a', strtotime( $row['createdAt'] ) ) : '';
+
         echo '<tr>';
-        echo '<td>' . esc_html( $row->id ) . '</td>';
-        echo '<td>' . esc_html( $user->display_name ) . '</td>';
-        echo '<td>' . esc_html( $row->type ) . '</td>';
-        echo '<td>' . esc_html( $row->amount ) . '</td>';
-        echo '<td>' . esc_html( $row->status ) . '</td>';
-        echo '<td>' . esc_html( $row->gateway_txn_id ) . '</td>';
-        echo '<td>' . esc_html( $row->scp_txn_id ) . '</td>';
-        echo '<td>' . esc_html( $row->created_at ) . '</td>';
+        echo '<td>' . esc_html( $row['id'] ) . '</td>';
+        echo '<td>' . esc_html( $row['player'] ) . '</td>';
+        echo '<td>' . esc_html( $row['round'] ) . '</td>';
+        echo '<td>' . esc_html( $row['provider'] ) . '</td>';
+        echo '<td>' . esc_html( $row['game'] ) . '</td>';
+        echo '<td><span style="display:inline-block;padding:2px 10px;border-radius:999px;background:' . esc_attr( $type_bg ) . ';color:' . esc_attr( $type_color ) . ';">' . esc_html( $row['type'] ) . '</span></td>';
+        echo '<td>$' . esc_html( number_format( (float) $row['amount'], 2 ) ) . '</td>';
+        echo '<td>$' . esc_html( number_format( (float) $row['preBalance'], 2 ) ) . '</td>';
+        echo '<td>$' . esc_html( number_format( (float) $row['currentBalance'], 2 ) ) . '</td>';
+        echo '<td><span style="display:inline-block;padding:2px 10px;border-radius:999px;background:' . esc_attr( $status_bg ) . ';color:' . esc_attr( $status_color ) . ';">' . esc_html( $row['status'] ) . '</span></td>';
+        echo '<td>' . esc_html( $created ) . '</td>';
         echo '</tr>';
     }
-    echo '</tbody></table></div>';
+
+    echo '</tbody></table>';
+
+    if ( $total > $filters['limit'] ) {
+        $base = remove_query_arg( 'offset' );
+        if ( $offset > 0 ) {
+            echo '<a class="button" href="' . esc_url( add_query_arg( 'offset', max( 0, $offset - $filters['limit'] ), $base ) ) . '">Previous</a> ';
+        }
+        if ( ( $offset + $filters['limit'] ) < $total ) {
+            echo '<a class="button" href="' . esc_url( add_query_arg( 'offset', $offset + $filters['limit'], $base ) ) . '">Next</a>';
+        }
+    }
+
+    echo '</div>';
 }
 
 // Withdrawal Requests List

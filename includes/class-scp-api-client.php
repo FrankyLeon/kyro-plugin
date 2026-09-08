@@ -21,7 +21,9 @@ class SCP_API_Client {
             'timeout' => 30,
         );
 
-        if ( ! empty( $body ) && in_array( $method, array('POST', 'PUT', 'PATCH') ) ) {
+        if ( ! empty( $body ) && strtoupper( $method ) === 'GET' ) {
+            $url = add_query_arg( $body, $url );
+        } elseif ( ! empty( $body ) && in_array( $method, array( 'POST', 'PUT', 'PATCH' ), true ) ) {
             $args['body'] = json_encode( $body );
         }
 
@@ -140,12 +142,34 @@ class SCP_API_Client {
         return $this->request( '/v1/wallet/transactions', 'GET', [], [ 'playerExternalId' => $playerExternalId ] );
     }
 
-    public function transaction_list( $playerExternalId = '' ) {
-        $endpoint = '/v1/transaction/list';
-        if ( ! empty( $playerExternalId ) ) {
-            $endpoint .= '?playerExternalId=' . rawurlencode( $playerExternalId );
+    /**
+     * GET /v1/transaction/list — startTime, endTime, offset, and limit are required by the API.
+     *
+     * @param array $params {
+     *     @type string $startTime
+     *     @type string $endTime
+     *     @type int    $offset
+     *     @type int    $limit
+     *     @type string $playerExternalId
+     *     @type string $roundId
+     *     @type string $transType
+     *     @type string $operator
+     * }
+     */
+    public function transaction_list( $params = array() ) {
+        if ( ! is_array( $params ) ) {
+            $params = array( 'playerExternalId' => (string) $params );
         }
-        return $this->request( $endpoint, 'GET' );
+
+        $query = array();
+        foreach ( $params as $key => $value ) {
+            if ( $value === null || $value === '' ) {
+                continue;
+            }
+            $query[ $key ] = is_bool( $value ) ? ( $value ? 'true' : 'false' ) : (string) $value;
+        }
+
+        return $this->request( '/v1/transaction/list', 'GET', $query );
     }
 
     public function support_contact( $playerExternalId, $subject, $message, $email = '' ) {

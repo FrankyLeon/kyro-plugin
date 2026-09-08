@@ -159,6 +159,198 @@ function scp_ajax_get_balance() {
 }
 
 /**
+ * Normalize a datetime value to the API format `Y-m-d H:i:s`.
+ *
+ * @param mixed $value Raw datetime from REST, admin form, or ISO input.
+ * @return string
+ */
+function scp_normalize_api_datetime( $value ) {
+    if ( $value === null || $value === '' ) {
+        return '';
+    }
+
+    $value = trim( str_replace( 'T', ' ', (string) $value ) );
+    $ts    = strtotime( $value );
+    if ( $ts === false ) {
+        return sanitize_text_field( $value );
+    }
+
+    return wp_date( 'Y-m-d H:i:s', $ts );
+}
+
+/**
+ * Default start/end window used by the transaction list UI (last 24 hours).
+ *
+ * @return array{startTime:string,endTime:string}
+ */
+function scp_transaction_default_times() {
+    $end_ts = current_time( 'timestamp' );
+    return [
+        'startTime' => wp_date( 'Y-m-d H:i:s', $end_ts - DAY_IN_SECONDS ),
+        'endTime'   => wp_date( 'Y-m-d H:i:s', $end_ts ),
+    ];
+}
+
+/**
+ * Map API transType integers (and string aliases) to Bet / Win / Refund labels.
+ *
+ * @param mixed $trans_type
+ * @return string
+ */
+function scp_transaction_type_label( $trans_type ) {
+    if ( is_string( $trans_type ) && ! is_numeric( $trans_type ) ) {
+        $normalized = strtolower( trim( $trans_type ) );
+        $aliases    = [
+            'bet'     => 'Bet',
+            'wager'   => 'Bet',
+            'win'     => 'Win',
+            'payout'  => 'Win',
+            'refund'  => 'Refund',
+            'cancel'  => 'Refund',
+            'rollback'=> 'Refund',
+            'bonus'   => 'Bonus',
+        ];
+        return $aliases[ $normalized ] ?? ucfirst( $normalized );
+    }
+
+    $map = [
+        1 => 'Bet',
+        2 => 'Win',
+        3 => 'Refund',
+        4 => 'Bonus',
+        5 => 'Rollback',
+    ];
+    $code = (int) $trans_type;
+    return $map[ $code ] ?? ( $code ? 'Type ' . $code : '' );
+}
+
+/**
+ * Map one /v1/transaction/list row to the fields used by the history UI.
+ *
+ * @param array $item
+ * @return array
+ */
+function scp_map_api_transaction( $item ) {
+    if ( ! is_array( $item ) ) {
+        return [];
+    }
+
+    $amount   = isset( $item['amount'] ) ? (float) $item['amount'] : 0;
+    $balance  = isset( $item['balance'] ) ? (float) $item['balance'] : 0;
+    $type     = scp_transaction_type_label( $item['transType'] ?? '' );
+    $success  = ! empty( $item['success'] );
+    $player   = (string) ( $item['playerExternalId'] ?? '' );
+    $code     = $item['playerCode'] ?? '';
+
+    if ( $type === 'Bet' || $type === 'Rollback' ) {
+        $pre_balance = $balance + $amount;
+    } elseif ( $type === 'Win' || $type === 'Refund' || $type === 'Bonus' ) {
+        $pre_balance = $balance - $amount;
+    } else {
+        $pre_balance = isset( $item['preBalance'] ) ? (float) $item['preBalance'] : $balance;
+    }
+
+    $player_label = $player;
+    if ( $code !== '' && $code !== null ) {
+        $player_label = $player !== '' ? $player . ' @' . $code : '@' . $code;
+    }
+
+    return [
+        'transId'          => (string) ( $item['transId'] ?? $item['id'] ?? '' ),
+        'id'               => (string) ( $item['transId'] ?? $item['id'] ?? '' ),
+        'transType'        => $item['transType'] ?? '',
+        'type'             => $type,
+        'playerCode'       => $code,
+        'playerExternalId' => $player,
+        'player'           => $player_label,
+        'roundId'          => (string) ( $item['roundId'] ?? '' ),
+        'round'            => (string) ( $item['roundId'] ?? '' ),
+        'providerId'       => $item['providerId'] ?? '',
+        'providerName'     => (string) ( $item['providerName'] ?? '' ),
+        'provider'         => (string) ( $item['providerName'] ?? '' ),
+        'gameCode'         => (string) ( $item['gameCode'] ?? '' ),
+        'gameName'         => (string) ( $item['gameName'] ?? '' ),
+        'game'             => (string) ( $item['gameName'] ?? '' ),
+        'amount'           => $amount,
+        'balance'          => $balance,
+        'preBalance'       => $pre_balance,
+        'currentBalance'   => $balance,
+        'success'          => $success,
+        'status'           => $success ? 'Success' : 'Failed',
+        'createdAt'        => (string) ( $item['createdAt'] ?? '' ),
+    ];
+}
+
+/**
+ * Fetch and map paginated game transactions from ScorpioPlay.
+ *
+ * @param array $args
+ * @return array{success:bool,message?:string,total:int,offset:int,count:int,list:array}
+ */
+function scp_fetch_transaction_list( $args = [] ) {
+    $defaults = scp_transaction_default_times();
+    $start    = scp_normalize_api_datetime( $args['startTime'] ?? '' ) ?: $defaults['startTime'];
+    $end      = scp_normalize_api_datetime( $args['endTime'] ?? '' ) ?: $defaults['endTime'];
+    $offset   = max( 0, (int) ( $args['offset'] ?? 0 ) );
+    $limit    = (int) ( $args['limit'] ?? 10 );
+    if ( $limit < 1 ) {
+        $limit = 10;
+    }
+    if ( $limit > 200 ) {
+        $limit = 200;
+    }
+
+    $params = [
+        'startTime' => $start,
+        'endTime'   => $end,
+        'offset'    => $offset,
+        'limit'     => $limit,
+    ];
+
+    foreach ( [ 'playerExternalId', 'roundId', 'transType', 'operator' ] as $optional ) {
+        if ( ! empty( $args[ $optional ] ) ) {
+            $params[ $optional ] = $args[ $optional ];
+        }
+    }
+
+    $api    = new SCP_API_Client();
+    $result = $api->transaction_list( $params );
+
+    if ( empty( $result['success'] ) ) {
+        return [
+            'success' => false,
+            'message' => $result['message'] ?? 'Unable to fetch transactions',
+            'total'   => 0,
+            'offset'  => $offset,
+            'count'   => 0,
+            'list'    => [],
+        ];
+    }
+
+    $data = is_array( $result['data'] ?? null ) ? $result['data'] : [];
+    $raw  = $data['list'] ?? $data['items'] ?? $data['transactions'] ?? [];
+    if ( ! is_array( $raw ) ) {
+        $raw = [];
+    }
+
+    $list = [];
+    foreach ( $raw as $item ) {
+        $mapped = scp_map_api_transaction( $item );
+        if ( $mapped ) {
+            $list[] = $mapped;
+        }
+    }
+
+    return [
+        'success' => true,
+        'total'   => (int) ( $data['total'] ?? count( $list ) ),
+        'offset'  => (int) ( $data['offset'] ?? $offset ),
+        'count'   => (int) ( $data['count'] ?? count( $list ) ),
+        'list'    => $list,
+    ];
+}
+
+/**
  * Get transaction history for a user.
  *
  * @param int $wp_user_id WordPress user ID

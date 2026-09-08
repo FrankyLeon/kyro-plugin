@@ -173,9 +173,20 @@ function scp_register_rest_routes() {
         'callback'            => 'scp_rest_transaction_list',
         'permission_callback' => 'scp_rest_permission_logged_in',
         'args'                => [
-            'user_id'   => [ 'required' => false, 'sanitize_callback' => 'absint' ],
-            'player_id' => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
-            'limit'     => [ 'required' => false, 'default' => 100, 'sanitize_callback' => 'absint' ],
+            'startTime'        => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'start_time'       => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'endTime'          => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'end_time'         => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'offset'           => [ 'required' => false, 'default' => 0, 'sanitize_callback' => 'absint' ],
+            'limit'            => [ 'required' => false, 'default' => 10, 'sanitize_callback' => 'absint' ],
+            'playerExternalId' => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'player_id'        => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'roundId'          => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'round_id'         => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'transType'        => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'trans_type'       => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'operator'         => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'user_id'          => [ 'required' => false, 'sanitize_callback' => 'absint' ],
         ],
     ] );
 
@@ -1047,24 +1058,45 @@ function scp_rest_wallet_transactions( $request ) {
 }
 
 function scp_rest_transaction_list( $request ) {
-    $player_id = $request->get_param( 'player_id' );
+    $player_id = scp_rest_param( $request, [ 'playerExternalId', 'player_id' ] );
     $user_id   = absint( $request->get_param( 'user_id' ) );
-    $limit     = absint( $request->get_param( 'limit' ) );
 
-    if ( $user_id === 0 && is_user_logged_in() ) {
-        $user_id = get_current_user_id();
+    if ( empty( $player_id ) && $user_id > 0 ) {
+        $user = get_userdata( $user_id );
+        $player_id = $user ? $user->user_login : '';
     }
 
-    if ( $user_id === 0 && empty( $player_id ) ) {
-        return new WP_Error( 'scp_transaction_list_missing_user', 'User ID or Player ID is required.', [ 'status' => 403 ] );
+    if ( empty( $player_id ) && is_user_logged_in() ) {
+        $user = wp_get_current_user();
+        $player_id = $user->user_login;
     }
 
-    if ( $user_id > 0 ) {
-        $transactions = scp_get_user_transactions( $user_id, $limit ?: 100 );
-        return rest_ensure_response( $transactions );
+    $result = scp_fetch_transaction_list( [
+        'startTime'        => scp_rest_param( $request, [ 'startTime', 'start_time' ] ),
+        'endTime'          => scp_rest_param( $request, [ 'endTime', 'end_time' ] ),
+        'offset'           => $request->get_param( 'offset' ),
+        'limit'            => $request->get_param( 'limit' ),
+        'playerExternalId' => $player_id,
+        'roundId'          => scp_rest_param( $request, [ 'roundId', 'round_id' ] ),
+        'transType'        => scp_rest_param( $request, [ 'transType', 'trans_type' ] ),
+        'operator'         => scp_rest_param( $request, [ 'operator' ] ),
+    ] );
+
+    if ( empty( $result['success'] ) ) {
+        return new WP_Error(
+            'scp_transaction_list_error',
+            $result['message'] ?? 'Unable to fetch transactions',
+            [ 'status' => 500 ]
+        );
     }
 
-    return rest_ensure_response( [ 'message' => 'No transactions available.' ] );
+    // Flat payload for FE mapper (parseApiResponse unwraps nested `data`).
+    return rest_ensure_response( [
+        'total'  => $result['total'],
+        'offset' => $result['offset'],
+        'count'  => $result['count'],
+        'list'   => $result['list'],
+    ] );
 }
 
 function scp_rest_support_contact( $request ) {
@@ -1170,7 +1202,14 @@ add_action( 'wp_ajax_scp_wallet_transactions', function() {
 add_action( 'wp_ajax_scp_transaction_list', function() {
     $request = new WP_REST_Request( 'GET', '/scp/v1/transaction/list' );
     $request->set_param( 'user_id', absint( $_REQUEST['user_id'] ?? 0 ) );
-    $request->set_param( 'limit', absint( $_REQUEST['limit'] ?? 100 ) );
+    $request->set_param( 'limit', absint( $_REQUEST['limit'] ?? 10 ) );
+    $request->set_param( 'offset', absint( $_REQUEST['offset'] ?? 0 ) );
+    $request->set_param( 'startTime', sanitize_text_field( $_REQUEST['startTime'] ?? $_REQUEST['start_time'] ?? '' ) );
+    $request->set_param( 'endTime', sanitize_text_field( $_REQUEST['endTime'] ?? $_REQUEST['end_time'] ?? '' ) );
+    $request->set_param( 'playerExternalId', sanitize_text_field( $_REQUEST['playerExternalId'] ?? $_REQUEST['player_id'] ?? '' ) );
+    $request->set_param( 'roundId', sanitize_text_field( $_REQUEST['roundId'] ?? $_REQUEST['round_id'] ?? '' ) );
+    $request->set_param( 'transType', sanitize_text_field( $_REQUEST['transType'] ?? $_REQUEST['trans_type'] ?? '' ) );
+    $request->set_param( 'operator', sanitize_text_field( $_REQUEST['operator'] ?? '' ) );
     scp_api_ajax_response( function() use ( $request ) { return scp_rest_transaction_list( $request ); } );
 } );
 add_action( 'wp_ajax_scp_support_contact', function() {
