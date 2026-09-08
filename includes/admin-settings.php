@@ -209,6 +209,7 @@ function scp_render_status_meta_box( $post ) {
     wp_nonce_field( 'scp_save_game_meta', 'scp_game_nonce' );
     
     $enabled = get_post_meta( $post->ID, 'scp_game_enabled', true );
+    $rating  = scp_get_game_rating( $post->ID );
     ?>
     <table class="form-table">
         <tr>
@@ -218,6 +219,22 @@ function scp_render_status_meta_box( $post ) {
                     <input type="checkbox" name="scp_game_enabled" id="scp_game_enabled" value="1" <?php checked( $enabled, 1 ); ?> />
                     <span style="margin-left: 8px;">Show this game in the frontend game lobby</span>
                 </label>
+            </td>
+        </tr>
+        <tr>
+            <th scope="row"><label for="scp_game_rating">Rating</label></th>
+            <td>
+                <input
+                    type="number"
+                    name="scp_game_rating"
+                    id="scp_game_rating"
+                    value="<?php echo esc_attr( $rating ); ?>"
+                    min="0"
+                    max="5"
+                    step="0.1"
+                    style="width: 6rem;"
+                />
+                <p class="description">Score from 0 to 5. Used for lobby sort by rating.</p>
             </td>
         </tr>
     </table>
@@ -295,6 +312,14 @@ function scp_save_game_meta( $post_id ) {
     // Save enabled/disabled status
     $enabled = isset( $_POST['scp_game_enabled'] ) ? 1 : 0;
     update_post_meta( $post_id, 'scp_game_enabled', $enabled );
+
+    if ( isset( $_POST['scp_game_rating'] ) ) {
+        update_post_meta(
+            $post_id,
+            'scp_game_rating',
+            scp_normalize_game_rating( wp_unslash( $_POST['scp_game_rating'] ) )
+        );
+    }
 }
 
 add_action( 'wp_ajax_scp_sync_games', 'scp_ajax_sync_games' );
@@ -311,6 +336,7 @@ function scp_game_custom_columns( $columns ) {
         $new[$key] = $value;
     }
     $new['game_id']     = 'Game ID';
+    $new['rating']      = 'Rating';
     $new['enabled']     = 'Enabled';
     $new['provider']    = 'Provider';
     return $new;
@@ -323,6 +349,9 @@ function scp_game_custom_column_content( $column, $post_id ) {
             break;
         case 'game_id':
             echo esc_html( get_post_meta( $post_id, 'scp_game_id', true ) );
+            break;
+        case 'rating':
+            echo esc_html( scp_get_game_rating( $post_id ) );
             break;
         case 'enabled':
             $enabled = get_post_meta( $post_id, 'scp_game_enabled', true );
@@ -624,6 +653,10 @@ function scp_sync_single_game( $game_data, $provider_id = null, $provider_name =
 
     if ( ! get_post_meta( $post_id, 'scp_game_enabled', true ) ) {
         update_post_meta( $post_id, 'scp_game_enabled', true );
+    }
+
+    if ( isset( $game_data['rating'] ) && $game_data['rating'] !== '' ) {
+        update_post_meta( $post_id, 'scp_game_rating', scp_normalize_game_rating( $game_data['rating'] ) );
     }
 }
 
