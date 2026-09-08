@@ -212,21 +212,22 @@ function scp_ajax_launch_game() {
 
     $game_language = sanitize_text_field( $_POST['game_language'] ?? 'en' );
     $currency = sanitize_text_field( $_POST['currency'] ?? 'USD' );
-    $rtp = sanitize_text_field( $_POST['rtp'] ?? 0 );
+    $rtp = absint( $_POST['rtp'] ?? 0 );
 
     $api = new SCP_API_Client();
 
-    $result = $api->request( '/v1/game/launch', 'POST', array(
-        'playerExternalId' => $user->user_login,
-        'providerId'      => $provider_id,
-        'gameCode'        => $game_id,
-        'language'        => $game_language,
-        'currency'        => $currency,
-        'rtp'             => $rtp,
-    ));
+    $result = $api->launch_game(
+        $user->user_login,
+        $provider_id,
+        $game_id,
+        $game_language,
+        $currency,
+        $rtp
+    );
 
-    if ( $result['success'] && ! empty( $result['data']['url'] ) ) {
-        wp_send_json_success( [ 'url' => $result['data']['url'] ] );
+    $launch_url = $result['data']['url'] ?? $result['data']['gameUrl'] ?? '';
+    if ( ! empty( $result['success'] ) && $launch_url ) {
+        wp_send_json_success( [ 'url' => $launch_url ] );
     } else {
         wp_send_json_error( [ 'message' => $result['message'] ?? 'Could not obtain game URL.' ] );
     }

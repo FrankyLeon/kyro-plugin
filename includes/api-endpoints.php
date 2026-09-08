@@ -546,17 +546,38 @@ function scp_rest_game_list( $request ) {
     return rest_ensure_response( $response );
 }
 
+function scp_launch_game_code( $game ) {
+    $code = get_post_meta( $game->ID, 'scp_game_code', true );
+    if ( $code !== '' && $code !== false ) {
+        return (string) $code;
+    }
+
+    $game_id     = (string) get_post_meta( $game->ID, 'scp_game_id', true );
+    $provider_id = (string) get_post_meta( $game->ID, 'scp_game_provider_id', true );
+    $prefix      = $provider_id . '_';
+    if ( $provider_id !== '' && strpos( $game_id, $prefix ) === 0 ) {
+        return substr( $game_id, strlen( $prefix ) );
+    }
+
+    $separator = strpos( $game_id, '_' );
+    return false === $separator ? $game_id : substr( $game_id, $separator + 1 );
+}
+
 function scp_format_lobby_game( $game ) {
-    $enabled = get_post_meta( $game->ID, 'scp_game_enabled', true );
+    $enabled     = get_post_meta( $game->ID, 'scp_game_enabled', true );
+    $provider_id = get_post_meta( $game->ID, 'scp_game_provider_id', true ) ?: '';
+    $game_id     = get_post_meta( $game->ID, 'scp_game_id', true ) ?: '';
+    $game_code   = scp_launch_game_code( $game );
 
     return [
-        'gameID'        => get_post_meta( $game->ID, 'scp_game_id', true ) ?: '',
+        'gameID'        => $game_id,
+        'gameCode'      => $game_code,
         'gameName'      => $game->post_title,
         'gameImage'     => get_the_post_thumbnail_url( $game->ID, 'full' ) ?: '',
         'gameType'      => get_post_meta( $game->ID, 'scp_game_type', true ) ?: '',
         'inMaintenance' => (bool) get_post_meta( $game->ID, 'scp_game_in_maintenance', true ),
         'status'        => $enabled ? '1' : '0',
-        'providerId'    => get_post_meta( $game->ID, 'scp_game_provider_id', true ) ?: '',
+        'providerId'    => $provider_id,
         'providerName'  => get_post_meta( $game->ID, 'scp_game_provider_name', true ) ?: '',
         'description'   => $game->post_content ?: '',
     ];
@@ -662,16 +683,27 @@ function scp_rest_param( $request, array $keys ) {
  * @return array{provider_id:string,game_code:string}|WP_Error
  */
 function scp_parse_game_slug( $slug ) {
-    $slug = strtolower( trim( (string) $slug ) );
+    $slug = trim( (string) $slug );
     $dash = strpos( $slug, '-' );
     if ( $dash === false || $dash < 1 ) {
         return new WP_Error( 'scp_game_invalid_slug', 'Game not found.', [ 'status' => 404 ] );
     }
 
     $provider_id = substr( $slug, 0, $dash );
-    $game_code   = substr( $slug, $dash + 1 );
+    $game_code   = rawurldecode( substr( $slug, $dash + 1 ) );
 
     if ( $provider_id === '' || $game_code === '' || ! ctype_digit( $provider_id ) || (int) $provider_id < 1 ) {
+        return new WP_Error( 'scp_game_invalid_slug', 'Game not found.', [ 'status' => 404 ] );
+    }
+
+    foreach ( array( '-', '_' ) as $separator ) {
+        $prefix = $provider_id . $separator;
+        if ( strpos( $game_code, $prefix ) === 0 && strlen( $game_code ) > strlen( $prefix ) ) {
+            $game_code = substr( $game_code, strlen( $prefix ) );
+        }
+    }
+
+    if ( $game_code === '' ) {
         return new WP_Error( 'scp_game_invalid_slug', 'Game not found.', [ 'status' => 404 ] );
     }
 
