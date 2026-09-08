@@ -4,7 +4,7 @@
  */
 
 // Create transaction log table on plugin activation and ensure schema upgrades on init
-register_activation_hook( plugin_dir_path( dirname( __FILE__ ) ) . 'scorpioplay-core.php', 'scp_create_transaction_table' );
+register_activation_hook( SCP_PLUGIN_DIR . 'scorpioplay-core.php', 'scp_create_transaction_table' );
 add_action( 'init', 'scp_upgrade_transaction_table' );
 
 function scp_create_transaction_table() {
@@ -13,8 +13,8 @@ function scp_create_transaction_table() {
     $charset_collate = $wpdb->get_charset_collate();
 
     $sql = "CREATE TABLE IF NOT EXISTS $table_name (
-        id bigint(20) NOT NULL AUTO_INCREMENT PRIMARY KEY,
-        txn_id varchar(100) NOT NULL UNIQUE,
+        id bigint(20) NOT NULL AUTO_INCREMENT,
+        txn_id varchar(100) NOT NULL,
         user_id bigint(20) NOT NULL,
         user_login varchar(100),
         type varchar(20) NOT NULL,
@@ -25,27 +25,37 @@ function scp_create_transaction_table() {
         scp_txn_id varchar(150) DEFAULT NULL,
         response longtext,
         created_at datetime DEFAULT CURRENT_TIMESTAMP,
-        updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        updated_at datetime DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY  (id),
+        UNIQUE KEY txn_id (txn_id),
         KEY user_id (user_id),
-        KEY txn_id (txn_id),
         KEY created_at (created_at)
     ) $charset_collate;";
 
-    require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );
-    dbDelta( $sql );
+    $wpdb->query( $sql );
 }
 
 function scp_upgrade_transaction_table() {
     global $wpdb;
     $table_name = $wpdb->prefix . 'scp_transactions';
+    $exists     = $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table_name ) );
+
+    if ( $exists !== $table_name ) {
+        scp_create_transaction_table();
+        return;
+    }
+
     $columns = $wpdb->get_results( "SHOW COLUMNS FROM $table_name" );
     if ( ! $columns ) {
         return;
     }
 
     $existing = wp_list_pluck( $columns, 'Field' );
-    if ( ! in_array( 'gateway_txn_id', $existing, true ) || ! in_array( 'scp_txn_id', $existing, true ) ) {
-        scp_create_transaction_table();
+    if ( ! in_array( 'gateway_txn_id', $existing, true ) ) {
+        $wpdb->query( "ALTER TABLE $table_name ADD COLUMN gateway_txn_id varchar(150) DEFAULT NULL" );
+    }
+    if ( ! in_array( 'scp_txn_id', $existing, true ) ) {
+        $wpdb->query( "ALTER TABLE $table_name ADD COLUMN scp_txn_id varchar(150) DEFAULT NULL" );
     }
 }
 
