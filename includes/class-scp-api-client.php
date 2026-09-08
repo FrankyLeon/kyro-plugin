@@ -106,12 +106,12 @@ class SCP_API_Client {
 
     public function launch_game( $playerExternalId, $providerId, $gameCode, $language = 'en', $currency = 'USD', $rtp = 0, $returnUrl = '' ) {
         $payload = array(
-            'playerExternalId' => $playerExternalId,
-            'providerId'       => $providerId,
-            'gameCode'         => $gameCode,
-            'language'         => $language,
-            'currency'         => $currency,
-            'rtp'              => $rtp,
+            'playerExternalId' => (string) $playerExternalId,
+            'providerId'       => (int) $providerId,
+            'gameCode'         => (string) $gameCode,
+            'language'         => (string) ( $language ?: 'en' ),
+            'currency'         => (string) ( $currency ?: 'USD' ),
+            'rtp'              => is_numeric( $rtp ) ? (int) $rtp : 0,
         );
         if ( ! empty( $returnUrl ) ) {
             $payload['returnUrl'] = $returnUrl;
