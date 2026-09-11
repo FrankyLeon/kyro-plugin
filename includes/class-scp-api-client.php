@@ -49,41 +49,32 @@ class SCP_API_Client {
     }
 
     public function deposit( $userId, $amount, $currency, $txn_id ) {
-        // Log transaction locally before API call
-        scp_log_transaction( $txn_id, $userId, 'deposit', $amount, $currency, 'pending' );
-
-        $response = $this->request( '/v1/player/wallet/deposit', 'POST', array(
-            'playerExternalId' => $userId,
-            'currency'         => $currency,
-            'amount'           => $amount,
-        ));
-
-        // Update transaction status based on response
-        if ( ! empty( $response['success'] ) ) {
-            scp_log_transaction( $txn_id, $userId, 'deposit', $amount, $currency, 'completed', $response );
-        } else {
-            scp_log_transaction( $txn_id, $userId, 'deposit', $amount, $currency, 'failed', $response );
-        }
-
-        return $response;
+        return $this->transfer( 'deposit', $userId, $amount, $currency, $txn_id, '/v1/player/wallet/deposit' );
     }
 
     public function withdraw( $userId, $amount, $currency, $txn_id ) {
-        // Log transaction locally before API call
-        scp_log_transaction( $txn_id, $userId, 'withdraw', $amount, $currency, 'pending' );
+        return $this->transfer( 'withdraw', $userId, $amount, $currency, $txn_id, '/v1/player/wallet/withdraw' );
+    }
 
-        $response = $this->request( '/v1/player/wallet/withdraw', 'POST', array(
+    private function transfer( $type, $userId, $amount, $currency, $txn_id, $endpoint ) {
+        $existing = function_exists( 'scp_get_transaction' ) ? scp_get_transaction( $txn_id ) : null;
+        $meta     = function_exists( 'scp_decode_transaction_response' )
+            ? scp_decode_transaction_response( $existing )
+            : array();
+
+        scp_log_transaction( $txn_id, $userId, $type, $amount, $currency, 'pending', $meta );
+
+        $response = $this->request( $endpoint, 'POST', array(
             'playerExternalId' => $userId,
             'currency'         => $currency,
             'amount'           => $amount,
-        ));
+        ) );
 
-        // Update transaction status based on response
-        if ( ! empty( $response['success'] ) ) {
-            scp_log_transaction( $txn_id, $userId, 'withdraw', $amount, $currency, 'completed', $response );
-        } else {
-            scp_log_transaction( $txn_id, $userId, 'withdraw', $amount, $currency, 'failed', $response );
-        }
+        $meta['api'] = $response;
+        $status      = ! empty( $response['success'] ) ? 'completed' : 'failed';
+        $scp_txn_id  = $response['data']['transaction_id'] ?? $response['data']['transactionId'] ?? '';
+
+        scp_log_transaction( $txn_id, $userId, $type, $amount, $currency, $status, $meta, '', $scp_txn_id );
 
         return $response;
     }

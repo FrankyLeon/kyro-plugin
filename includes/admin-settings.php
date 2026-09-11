@@ -20,8 +20,8 @@ function scp_add_admin_menu() {
     // Add submenu to our main menu
     add_submenu_page(
         'scorpioplay',
-        'Deposit Destinations',
-        'Deposit Destinations',
+        'Payment Methods',
+        'Payment Methods',
         'manage_options',
         'scp-deposit-destinations',
         'scp_render_deposit_destinations_page'
@@ -51,6 +51,15 @@ function scp_add_admin_menu() {
         'manage_options',
         'scp-user-sync',
         'scp_render_user_mapping_page'
+    );
+
+    add_submenu_page(
+        'scorpioplay',
+        'Deposit Requests',
+        'Deposits',
+        'manage_options',
+        'scp-deposits',
+        'scp_deposits_page'
     );
 
     add_submenu_page(
@@ -639,22 +648,112 @@ function scp_set_featured_image_from_url( $post_id, $url ) {
 }
 
 
+function scp_admin_user_label( $row ) {
+    $user = get_userdata( $row->user_id );
+    if ( $user ) {
+        return $user->display_name . ' (' . $user->user_email . ')';
+    }
+
+    return $row->user_login ?: ( 'User #' . $row->user_id );
+}
+
+function scp_admin_handle_wallet_request_action( $page_slug ) {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        return '';
+    }
+
+    if ( isset( $_GET['approve'] ) ) {
+        $id = absint( $_GET['approve'] );
+        if ( ! wp_verify_nonce( $_GET['_wpnonce'] ?? '', 'scp-approve-' . $id ) ) {
+            return '<div class="notice notice-error"><p>Invalid approval request.</p></div>';
+        }
+
+        $result = scp_approve_wallet_request( $id );
+        if ( ! empty( $result['success'] ) ) {
+            return '<div class="notice notice-success"><p>Request approved. Scorpio API was called and the log was updated.</p></div>';
+        }
+
+        return '<div class="notice notice-error"><p>Approval failed: ' . esc_html( $result['message'] ?? 'Unknown error' ) . '</p></div>';
+    }
+
+    if ( isset( $_GET['reject'] ) ) {
+        $id = absint( $_GET['reject'] );
+        if ( ! wp_verify_nonce( $_GET['_wpnonce'] ?? '', 'scp-reject-' . $id ) ) {
+            return '<div class="notice notice-error"><p>Invalid rejection request.</p></div>';
+        }
+
+        $result = scp_reject_wallet_request( $id );
+        if ( ! empty( $result['success'] ) ) {
+            return '<div class="notice notice-success"><p>Request rejected. The log was updated.</p></div>';
+        }
+
+        return '<div class="notice notice-error"><p>Rejection failed: ' . esc_html( $result['message'] ?? 'Unknown error' ) . '</p></div>';
+    }
+
+    unset( $page_slug );
+    return '';
+}
+
+function scp_admin_render_pending_wallet_page( $type, $title, $page_slug ) {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        return;
+    }
+
+    $notice  = scp_admin_handle_wallet_request_action( $page_slug );
+    $pending = scp_get_pending_wallet_requests( $type );
+
+    echo '<div class="wrap">';
+    echo '<h1>' . esc_html( $title ) . '</h1>';
+    echo $notice; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+    echo '<p>Approve only after the selected payment method has succeeded. Approval calls Scorpio API and leaves a transaction log.</p>';
+
+    if ( empty( $pending ) ) {
+        echo '<p>No pending requests.</p></div>';
+        return;
+    }
+
+    echo '<table class="wp-list-table widefat fixed striped">';
+    echo '<thead><tr><th>ID</th><th>User</th><th>Amount</th><th>Method / details</th><th>Date</th><th>Actions</th></tr></thead><tbody>';
+    foreach ( $pending as $row ) {
+        $meta    = scp_decode_transaction_response( $row );
+        $details = scp_format_wallet_details( $meta );
+        $approve = wp_nonce_url( admin_url( 'admin.php?page=' . $page_slug . '&approve=' . $row->id ), 'scp-approve-' . $row->id );
+        $reject  = wp_nonce_url( admin_url( 'admin.php?page=' . $page_slug . '&reject=' . $row->id ), 'scp-reject-' . $row->id );
+
+        echo '<tr>';
+        echo '<td>' . esc_html( $row->id ) . '<br><code>' . esc_html( $row->txn_id ) . '</code></td>';
+        echo '<td>' . esc_html( scp_admin_user_label( $row ) ) . '</td>';
+        echo '<td>' . esc_html( $row->amount ) . ' ' . esc_html( $row->currency ) . '</td>';
+        echo '<td>' . esc_html( $details ?: '—' ) . '</td>';
+        echo '<td>' . esc_html( $row->created_at ) . '</td>';
+        echo '<td><a href="' . esc_url( $approve ) . '">Approve</a> | <a href="' . esc_url( $reject ) . '">Reject</a></td>';
+        echo '</tr>';
+    }
+    echo '</tbody></table></div>';
+}
+
+function scp_deposits_page() {
+    scp_admin_render_pending_wallet_page( 'deposit', 'Pending Deposit Requests', 'scp-deposits' );
+}
+
 function scp_logs_page() {
     global $wpdb;
     $table = $wpdb->prefix . 'scp_transactions';
-    $logs = $wpdb->get_results( "SELECT * FROM $table ORDER BY created_at DESC LIMIT 200" );
+    $logs  = $wpdb->get_results( "SELECT * FROM $table ORDER BY created_at DESC LIMIT 200" );
     echo '<div class="wrap"><h1>Transaction Log</h1>';
+    echo '<p>All deposit and withdraw requests, including pending, completed, failed, and rejected.</p>';
     echo '<table class="wp-list-table widefat fixed striped">';
-    echo '<thead><tr><th>ID</th><th>User</th><th>Type</th><th>Amount</th><th>Status</th><th>Gateway Txn</th><th>SCP Txn</th><th>Date</th></tr></thead><tbody>';
+    echo '<thead><tr><th>ID</th><th>User</th><th>Type</th><th>Amount</th><th>Status</th><th>Method / details</th><th>SCP Txn</th><th>Date</th></tr></thead><tbody>';
     foreach ( $logs as $row ) {
-        $user = get_userdata( $row->user_id );
+        $meta    = scp_decode_transaction_response( $row );
+        $details = scp_format_wallet_details( $meta );
         echo '<tr>';
-        echo '<td>' . esc_html( $row->id ) . '</td>';
-        echo '<td>' . esc_html( $user->display_name ) . '</td>';
-        echo '<td>' . esc_html( $row->type ) . '</td>';
-        echo '<td>' . esc_html( $row->amount ) . '</td>';
+        echo '<td>' . esc_html( $row->id ) . '<br><code>' . esc_html( $row->txn_id ) . '</code></td>';
+        echo '<td>' . esc_html( scp_admin_user_label( $row ) ) . '</td>';
+        echo '<td>' . esc_html( scp_normalize_wallet_type( $row->type ) ) . '</td>';
+        echo '<td>' . esc_html( $row->amount ) . ' ' . esc_html( $row->currency ) . '</td>';
         echo '<td>' . esc_html( $row->status ) . '</td>';
-        echo '<td>' . esc_html( $row->gateway_txn_id ) . '</td>';
+        echo '<td>' . esc_html( $details ?: ( $row->gateway_txn_id ?: '—' ) ) . '</td>';
         echo '<td>' . esc_html( $row->scp_txn_id ) . '</td>';
         echo '<td>' . esc_html( $row->created_at ) . '</td>';
         echo '</tr>';
@@ -662,55 +761,8 @@ function scp_logs_page() {
     echo '</tbody></table></div>';
 }
 
-// Withdrawal Requests List
 function scp_withdrawals_page() {
-    global $wpdb;
-    $table = $wpdb->prefix . 'scp_transactions';
-    $pending = $wpdb->get_results( "SELECT * FROM $table WHERE type='withdrawal' AND status='pending'" );
-
-    echo '<div class="wrap"><h1>Pending Withdrawal Requests</h1>';
-    if ( empty( $pending ) ) {
-        echo '<p>No pending requests.</p>';
-    } else {
-        echo '<table class="wp-list-table widefat fixed striped">';
-        echo '<thead><tr><th>ID</th><th>User</th><th>Amount</th><th>Details</th><th>Actions</th></tr></thead><tbody>';
-        foreach ( $pending as $row ) {
-            $user = get_userdata( $row->user_id );
-            echo '<tr>';
-            echo '<td>' . esc_html( $row->id ) . '</td>';
-            echo '<td>' . esc_html( $user->display_name ) . ' (' . esc_html( $user->user_email ) . ')</td>';
-            echo '<td>' . esc_html( $row->amount ) . '</td>';
-            echo '<td>' . esc_html( $row->gateway_txn_id ) . '</td>'; // We stored details in gateway_txn_id? Yes we used it as a placeholder; better to add a 'details' column. For now, it's the tx_id.
-            echo '<td>
-                <a href="' . esc_url( wp_nonce_url( admin_url('admin.php?page=scp-withdrawals&approve='.$row->id), 'scp-approve-'.$row->id ) ) . '">Approve</a> |
-                <a href="' . esc_url( wp_nonce_url( admin_url('admin.php?page=scp-withdrawals&reject='.$row->id), 'scp-reject-'.$row->id ) ) . '">Reject</a>
-            </td>';
-            echo '</tr>';
-        }
-        echo '</tbody></table>';
-    }
-    echo '</div>';
-
-    // Handle approve/reject actions
-    if ( isset( $_GET['approve'] ) && wp_verify_nonce( $_GET['_wpnonce'], 'scp-approve-'.$_GET['approve'] ) ) {
-        $tx_id = intval( $_GET['approve'] );
-        $tx = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table WHERE id=%d", $tx_id ) );
-        if ( $tx && $tx->status == 'pending' ) {
-            $token = get_user_meta( $tx->user_id, 'scp_token', true );
-            $api = new SCP_API_Client();
-            $result = $api->withdraw( $token, $tx->amount, $tx->gateway_txn_id ); // tx_id used as idempotency key
-            if ( $result['success'] ) {
-                $wpdb->update( $table, [ 'status' => 'completed', 'scp_txn_id' => $result['data']['transaction_id'] ?? '' ], [ 'id' => $tx_id ] );
-                echo '<div class="notice notice-success"><p>Withdrawal approved.</p></div>';
-            } else {
-                echo '<div class="notice notice-error"><p>Withdrawal failed: ' . esc_html( $result['message'] ) . '</p></div>';
-            }
-        }
-    } elseif ( isset( $_GET['reject'] ) && wp_verify_nonce( $_GET['_wpnonce'], 'scp-reject-'.$_GET['reject'] ) ) {
-        $tx_id = intval( $_GET['reject'] );
-        $wpdb->update( $table, [ 'status' => 'rejected' ], [ 'id' => $tx_id ] );
-        echo '<div class="notice notice-success"><p>Withdrawal rejected.</p></div>';
-    }
+    scp_admin_render_pending_wallet_page( 'withdraw', 'Pending Withdrawal Requests', 'scp-withdrawals' );
 }
 
 // Balance Manager (manual adjust)

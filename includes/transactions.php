@@ -245,3 +245,238 @@ function scp_process_player_withdrawal( $wp_user_id, $amount, $currency = 'USD',
     $api = new SCP_API_Client();
     return $api->withdraw( $player_external_id, $amount, $currency, $withdrawal_id );
 }
+
+function scp_normalize_wallet_type( $type ) {
+    $type = strtolower( (string) $type );
+    if ( in_array( $type, array( 'withdraw', 'withdrawal' ), true ) ) {
+        return 'withdraw';
+    }
+
+    return 'deposit';
+}
+
+function scp_decode_transaction_response( $tx ) {
+    if ( is_array( $tx ) ) {
+        $raw = $tx['response'] ?? '';
+    } elseif ( is_object( $tx ) ) {
+        $raw = $tx->response ?? '';
+    } else {
+        $raw = '';
+    }
+
+    $data = json_decode( (string) $raw, true );
+    return is_array( $data ) ? $data : array();
+}
+
+function scp_sanitize_card_meta( $raw ) {
+    if ( ! is_array( $raw ) ) {
+        return array();
+    }
+
+    $number = preg_replace( '/\D+/', '', (string) ( $raw['cardNumber'] ?? $raw['card_number'] ?? '' ) );
+
+    return array(
+        'cardholderName' => sanitize_text_field( $raw['cardholderName'] ?? $raw['cardholder_name'] ?? '' ),
+        'last4'          => $number ? substr( $number, -4 ) : '',
+        'expiry'         => sanitize_text_field( $raw['expiry'] ?? '' ),
+    );
+}
+
+function scp_sanitize_withdraw_destination( $raw ) {
+    if ( ! is_array( $raw ) ) {
+        return array();
+    }
+
+    $method = strtolower( sanitize_text_field( $raw['method'] ?? 'bank' ) );
+    if ( ! in_array( $method, array( 'bank', 'crypto', 'paypal' ), true ) ) {
+        $method = 'bank';
+    }
+
+    return array(
+        'method'        => $method,
+        'accountName'   => sanitize_text_field( $raw['accountName'] ?? $raw['account_name'] ?? '' ),
+        'accountNumber' => sanitize_text_field( $raw['accountNumber'] ?? $raw['account_number'] ?? '' ),
+        'bankName'      => sanitize_text_field( $raw['bankName'] ?? $raw['bank_name'] ?? '' ),
+        'cryptoAddress' => sanitize_text_field( $raw['cryptoAddress'] ?? $raw['crypto_address'] ?? '' ),
+        'paypalEmail'   => sanitize_email( $raw['paypalEmail'] ?? $raw['paypal_email'] ?? '' ),
+    );
+}
+
+function scp_format_wallet_details( $meta ) {
+    if ( ! is_array( $meta ) ) {
+        return '';
+    }
+
+    $parts  = array();
+    $method = $meta['method'] ?? $meta['payment_method'] ?? '';
+    if ( $method ) {
+        $parts[] = strtoupper( (string) $method );
+    }
+
+    $destination = isset( $meta['destination'] ) && is_array( $meta['destination'] ) ? $meta['destination'] : array();
+    foreach ( array( 'bankName', 'accountName', 'accountNumber', 'cryptoAddress', 'paypalEmail' ) as $key ) {
+        if ( ! empty( $destination[ $key ] ) ) {
+            $parts[] = $destination[ $key ];
+        }
+    }
+
+    if ( ! empty( $meta['paypal']['email'] ) ) {
+        $parts[] = $meta['paypal']['email'];
+    }
+    if ( ! empty( $meta['crypto']['currency'] ) ) {
+        $parts[] = $meta['crypto']['currency'];
+    }
+    if ( ! empty( $meta['card']['last4'] ) ) {
+        $parts[] = '****' . $meta['card']['last4'];
+    }
+
+    return implode( ' · ', array_filter( array_map( 'strval', $parts ) ) );
+}
+
+function scp_player_login_for_transaction( $tx ) {
+    if ( ! empty( $tx->user_login ) ) {
+        return $tx->user_login;
+    }
+
+    $user = get_userdata( (int) $tx->user_id );
+    return $user ? $user->user_login : '';
+}
+
+function scp_create_pending_wallet_request( $wp_user_id, $player_external_id, $type, $amount, $currency, $meta = array() ) {
+    $type     = scp_normalize_wallet_type( $type );
+    $currency = strtoupper( $currency ?: 'USD' );
+    $txn_id   = 'wp-' . $type . '-' . uniqid();
+
+    scp_log_transaction(
+        $txn_id,
+        $player_external_id,
+        $type,
+        $amount,
+        $currency,
+        'pending',
+        is_array( $meta ) ? $meta : array()
+    );
+
+    return $txn_id;
+}
+
+function scp_get_pending_wallet_requests( $type ) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'scp_transactions';
+    $type  = scp_normalize_wallet_type( $type );
+
+    if ( $type === 'withdraw' ) {
+        return $wpdb->get_results(
+            "SELECT * FROM $table WHERE type IN ('withdraw','withdrawal') AND status='pending' ORDER BY created_at DESC"
+        );
+    }
+
+    return $wpdb->get_results(
+        $wpdb->prepare(
+            "SELECT * FROM $table WHERE type = %s AND status = 'pending' ORDER BY created_at DESC",
+            'deposit'
+        )
+    );
+}
+
+function scp_approve_wallet_request( $id ) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'scp_transactions';
+    $tx    = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table WHERE id = %d", absint( $id ) ) );
+
+    if ( ! $tx ) {
+        return array( 'success' => false, 'message' => 'Transaction not found.' );
+    }
+    if ( $tx->status !== 'pending' ) {
+        return array( 'success' => false, 'message' => 'This request is no longer pending.' );
+    }
+
+    $player_login = scp_player_login_for_transaction( $tx );
+    if ( $player_login === '' ) {
+        return array( 'success' => false, 'message' => 'Player login is missing for this request.' );
+    }
+
+    $type     = scp_normalize_wallet_type( $tx->type );
+    $currency = strtoupper( $tx->currency ?: 'USD' );
+    $api      = new SCP_API_Client();
+
+    if ( $type === 'deposit' ) {
+        $result = $api->deposit( $player_login, (float) $tx->amount, $currency, $tx->txn_id );
+    } else {
+        $result = $api->withdraw( $player_login, (float) $tx->amount, $currency, $tx->txn_id );
+    }
+
+    if ( ! empty( $result['success'] ) ) {
+        $scp_txn_id = $result['data']['transaction_id']
+            ?? $result['data']['transactionId']
+            ?? '';
+        if ( $scp_txn_id ) {
+            $wpdb->update(
+                $table,
+                array( 'scp_txn_id' => $scp_txn_id ),
+                array( 'id' => $tx->id ),
+                array( '%s' ),
+                array( '%d' )
+            );
+        }
+    }
+
+    return $result;
+}
+
+function scp_reject_wallet_request( $id ) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'scp_transactions';
+    $tx    = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table WHERE id = %d", absint( $id ) ) );
+
+    if ( ! $tx ) {
+        return array( 'success' => false, 'message' => 'Transaction not found.' );
+    }
+    if ( $tx->status !== 'pending' ) {
+        return array( 'success' => false, 'message' => 'This request is no longer pending.' );
+    }
+
+    $meta           = scp_decode_transaction_response( $tx );
+    $meta['rejected_at'] = current_time( 'mysql' );
+
+    $updated = $wpdb->update(
+        $table,
+        array(
+            'status'   => 'rejected',
+            'response' => wp_json_encode( $meta ),
+        ),
+        array( 'id' => $tx->id ),
+        array( '%s', '%s' ),
+        array( '%d' )
+    );
+
+    return $updated === false
+        ? array( 'success' => false, 'message' => 'Could not reject request.' )
+        : array( 'success' => true );
+}
+
+function scp_format_transaction_for_rest( $row ) {
+    $meta   = scp_decode_transaction_response( $row );
+    $type   = scp_normalize_wallet_type( $row->type );
+    $status = $row->status ?: 'pending';
+
+    $created_mysql = $row->created_at ?? current_time( 'mysql' );
+    $created_iso   = mysql2date( 'c', $created_mysql, false );
+
+    return array(
+        'id'          => $row->txn_id,
+        'txn_id'      => $row->txn_id,
+        'userId'      => (string) $row->user_id,
+        'user_id'     => (string) $row->user_id,
+        'type'        => $type,
+        'amount'      => (float) $row->amount,
+        'amountCents' => (int) round( (float) $row->amount * 100 ),
+        'amount_cents'=> (int) round( (float) $row->amount * 100 ),
+        'currency'    => strtoupper( $row->currency ?: 'USD' ),
+        'status'      => $status,
+        'method'      => $meta['method'] ?? $meta['payment_method'] ?? '',
+        'createdAt'   => $created_iso,
+        'created_at'  => $created_iso,
+        'reference'   => $row->scp_txn_id ?: $row->txn_id,
+    );
+}

@@ -155,6 +155,7 @@ function scp_register_rest_routes() {
             'currency'       => [ 'required' => false, 'default' => 'USD', 'sanitize_callback' => 'sanitize_text_field' ],
             'withdrawal_id'  => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
             'player_id'      => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'method'         => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
         ],
     ] );
 
@@ -828,6 +829,16 @@ function scp_rest_resolve_deposit_amount( $request ) {
     return 0.0;
 }
 
+function scp_rest_json_param( $request, $key, $default = null ) {
+    $json = $request->get_json_params();
+    if ( is_array( $json ) && array_key_exists( $key, $json ) ) {
+        return $json[ $key ];
+    }
+
+    $value = $request->get_param( $key );
+    return $value !== null ? $value : $default;
+}
+
 function scp_rest_wallet_deposit( $request ) {
     $player_id = $request->get_param( 'player_id' );
     $user_id = 0;
@@ -840,6 +851,9 @@ function scp_rest_wallet_deposit( $request ) {
     } elseif ( is_user_logged_in() ) {
         $user = wp_get_current_user();
         $user_id = $user->ID;
+        if ( empty( $player_id ) ) {
+            $player_id = $user->user_login;
+        }
     }
 
     if ( empty( $player_id ) ) {
@@ -848,52 +862,61 @@ function scp_rest_wallet_deposit( $request ) {
 
     $amount   = scp_rest_resolve_deposit_amount( $request );
     $currency = strtoupper( $request->get_param( 'currency' ) ?: 'USD' );
-    $order_id = $request->get_param( 'order_id' );
-    $method   = strtolower( sanitize_text_field( $request->get_param( 'method' ) ?: 'card' ) );
+    $method   = strtolower( sanitize_text_field( $request->get_param( 'method' ) ?: 'bank' ) );
     if ( ! in_array( $method, [ 'bank', 'card', 'paypal', 'crypto' ], true ) ) {
-        $method = 'card';
+        $method = 'bank';
     }
 
     if ( $amount <= 0 ) {
         return new WP_Error( 'scp_wallet_deposit_invalid_amount', 'Deposit amount must be greater than zero.', [ 'status' => 400 ] );
     }
 
-    if ( empty( $order_id ) ) {
-        $order_id = 'deposit_' . ( $user_id ?: $player_id ) . '_' . time();
+    $destinations = scp_get_deposit_destinations();
+    if ( empty( $destinations[ $method ]['enabled'] ) ) {
+        return new WP_Error( 'scp_wallet_deposit_method_disabled', 'This deposit method is not available.', [ 'status' => 400 ] );
     }
 
-    $result = scp_process_player_deposit( $user_id, $amount, $currency, $order_id, $player_id );
-    if ( empty( $result['success'] ) ) {
-        return new WP_Error( 'scp_wallet_deposit_error', $result['message'] ?? 'Deposit failed', [ 'status' => 500 ] );
-    }
+    $meta = [
+        'method'         => $method,
+        'payment_method' => $method,
+        'source'         => 'fe',
+    ];
 
-    // Persist payment method on the local transaction log response.
-    $txn = scp_get_transaction( $order_id );
-    if ( $txn ) {
-        $response_data = json_decode( $txn->response ?: '{}', true );
-        if ( ! is_array( $response_data ) ) {
-            $response_data = [];
+    if ( $method === 'card' ) {
+        $meta['card'] = scp_sanitize_card_meta( scp_rest_json_param( $request, 'card', [] ) );
+        if ( empty( $meta['card']['cardholderName'] ) || empty( $meta['card']['last4'] ) ) {
+            return new WP_Error( 'scp_wallet_deposit_card_required', 'Enter cardholder name and card number.', [ 'status' => 400 ] );
         }
-        $response_data['method'] = $method;
-        $response_data['payment_method'] = $method;
-        global $wpdb;
-        $wpdb->update(
-            $wpdb->prefix . 'scp_transactions',
-            [ 'response' => wp_json_encode( $response_data ) ],
-            [ 'txn_id' => $order_id ],
-            [ '%s' ],
-            [ '%s' ]
-        );
     }
 
-    $balance_result = scp_fetch_player_balance_payload( $player_id, $currency );
+    if ( $method === 'paypal' ) {
+        $paypal = scp_rest_json_param( $request, 'paypal', [] );
+        $email  = is_array( $paypal ) ? sanitize_email( $paypal['email'] ?? '' ) : '';
+        if ( $email === '' && $user ) {
+            $email = $user->user_email;
+        }
+        if ( $email === '' ) {
+            return new WP_Error( 'scp_wallet_deposit_paypal_required', 'Enter your PayPal email.', [ 'status' => 400 ] );
+        }
+        $meta['paypal'] = [ 'email' => $email ];
+    }
+
+    if ( $method === 'crypto' ) {
+        $crypto   = scp_rest_json_param( $request, 'crypto', [] );
+        $currency_code = is_array( $crypto ) ? strtoupper( sanitize_text_field( $crypto['currency'] ?? 'USDT' ) ) : 'USDT';
+        $meta['crypto'] = [ 'currency' => $currency_code ];
+    }
+
+    $order_id = scp_create_pending_wallet_request( $user_id, $player_id, 'deposit', $amount, $currency, $meta );
+
+    $balance_result  = scp_fetch_player_balance_payload( $player_id, $currency );
     $balance_payload = ! empty( $balance_result['success'] )
         ? $balance_result['data']
         : scp_build_balance_payload( [
             'balance' => [
                 [
                     'currency' => $currency,
-                    'amount'   => floatval( $result['data']['balance'] ?? $amount ),
+                    'amount'   => 0,
                 ],
             ],
             'playerCode' => 0,
@@ -911,10 +934,6 @@ function scp_rest_wallet_deposit( $request ) {
     }
 
     $amount_cents = (int) round( $amount * 100 );
-    $scp_txn_id = $result['data']['transaction_id']
-        ?? $result['data']['transactionId']
-        ?? $order_id;
-
     $transaction = [
         'id'          => $order_id,
         'userId'      => $user ? (string) $user->ID : (string) $user_id,
@@ -922,9 +941,9 @@ function scp_rest_wallet_deposit( $request ) {
         'priceCents'  => $amount_cents,
         'currency'    => $currency,
         'method'      => $method,
-        'status'      => 'completed',
+        'status'      => 'pending',
         'createdAt'   => current_time( 'c' ),
-        'reference'   => (string) $scp_txn_id,
+        'reference'   => $order_id,
         'txn_id'      => $order_id,
     ];
 
@@ -990,60 +1009,117 @@ function scp_rest_player_balance( $request ) {
 function scp_rest_wallet_withdraw( $request ) {
     $player_id = $request->get_param( 'player_id' );
     $user_id = 0;
-    
+    $user = null;
+
     if ( empty( $player_id ) && is_user_logged_in() ) {
         $user = wp_get_current_user();
         $user_id = $user->ID;
         $player_id = $user->user_login;
+    } elseif ( is_user_logged_in() ) {
+        $user = wp_get_current_user();
+        $user_id = $user->ID;
+        if ( empty( $player_id ) ) {
+            $player_id = $user->user_login;
+        }
     }
 
     if ( empty( $player_id ) ) {
         return new WP_Error( 'scp_wallet_withdraw_missing_player', 'Player ID is required.', [ 'status' => 403 ] );
     }
 
-    $amount   = floatval( $request->get_param( 'amount' ) );
-    $currency = $request->get_param( 'currency' );
-    $withdrawal_id = $request->get_param( 'withdrawal_id' );
+    $amount      = floatval( $request->get_param( 'amount' ) );
+    $currency    = strtoupper( $request->get_param( 'currency' ) ?: 'USD' );
+    $destination = scp_sanitize_withdraw_destination( scp_rest_json_param( $request, 'destination', [] ) );
+    $method      = strtolower( sanitize_text_field( $request->get_param( 'method' ) ?: ( $destination['method'] ?? 'bank' ) ) );
+    if ( ! in_array( $method, [ 'bank', 'crypto', 'paypal' ], true ) ) {
+        $method = 'bank';
+    }
+    $destination['method'] = $method;
 
     if ( $amount <= 0 ) {
         return new WP_Error( 'scp_wallet_withdraw_invalid_amount', 'Withdrawal amount must be greater than zero.', [ 'status' => 400 ] );
     }
 
-    $result = scp_process_player_withdrawal( $user_id, $amount, $currency ?: 'USD', $withdrawal_id, $player_id );
-    if ( empty( $result['success'] ) ) {
-        return new WP_Error( 'scp_wallet_withdraw_error', $result['message'] ?? 'Withdrawal failed', [ 'status' => 500 ] );
+    $withdraw_methods = scp_get_withdraw_methods();
+    if ( empty( $withdraw_methods[ $method ]['enabled'] ) ) {
+        return new WP_Error( 'scp_wallet_withdraw_method_disabled', 'This withdrawal method is not available.', [ 'status' => 400 ] );
     }
 
-    return rest_ensure_response( $result );
+    if ( $method === 'bank' && ( $destination['accountName'] === '' || $destination['accountNumber'] === '' ) ) {
+        return new WP_Error( 'scp_wallet_withdraw_bank_required', 'Enter your account name and number.', [ 'status' => 400 ] );
+    }
+    if ( $method === 'crypto' && $destination['cryptoAddress'] === '' ) {
+        return new WP_Error( 'scp_wallet_withdraw_crypto_required', 'Enter your crypto payout address.', [ 'status' => 400 ] );
+    }
+    if ( $method === 'paypal' ) {
+        if ( $destination['paypalEmail'] === '' && $user ) {
+            $destination['paypalEmail'] = $user->user_email;
+        }
+        if ( $destination['paypalEmail'] === '' ) {
+            return new WP_Error( 'scp_wallet_withdraw_paypal_required', 'Enter your PayPal email.', [ 'status' => 400 ] );
+        }
+    }
+
+    $balance_check = scp_get_player_balance( $player_id, $currency );
+    if ( ! empty( $balance_check['success'] ) && ! empty( $balance_check['balances'][0]['amount'] ) ) {
+        $available = floatval( $balance_check['balances'][0]['amount'] );
+        if ( $amount > $available ) {
+            return new WP_Error( 'scp_wallet_withdraw_exceeds_balance', 'Amount exceeds your available balance.', [ 'status' => 400 ] );
+        }
+    }
+
+    $meta = [
+        'method'         => $method,
+        'payment_method' => $method,
+        'destination'    => $destination,
+        'source'         => 'fe',
+    ];
+
+    $txn_id = scp_create_pending_wallet_request( $user_id, $player_id, 'withdraw', $amount, $currency, $meta );
+
+    $balance_result  = scp_fetch_player_balance_payload( $player_id, $currency );
+    $balance_payload = ! empty( $balance_result['success'] )
+        ? $balance_result['data']
+        : scp_build_balance_payload( [
+            'balance'    => [ [ 'currency' => $currency, 'amount' => 0 ] ],
+            'playerCode' => 0,
+        ], $currency );
+
+    $balance = floatval( $balance_payload['balances'][0]['amount'] ?? 0 );
+
+    return rest_ensure_response( [
+        'currency'       => $currency,
+        'balance'        => $balance,
+        'withdrawAmount' => $amount,
+        'status'         => 'pending',
+        'txn_id'         => $txn_id,
+        'reference'      => $txn_id,
+        'method'         => $method,
+    ] );
 }
 
 function scp_rest_wallet_transactions( $request ) {
     $player_id = $request->get_param( 'player_id' );
     $user_id   = 0;
-    
+
     if ( empty( $player_id ) && is_user_logged_in() ) {
         $user = wp_get_current_user();
         $user_id = $user->ID;
         $player_id = $user->user_login;
+    } elseif ( is_user_logged_in() ) {
+        $user = wp_get_current_user();
+        $user_id = $user->ID;
     }
 
-    $limit = absint( $request->get_param( 'limit' ) );
-
-    if ( ! empty( $player_id ) ) {
-        $api = new SCP_API_Client();
-        $result = $api->request( '/wallet/transactions', 'GET', [], [ 'playerExternalId' => $player_id ] );
-
-        if ( ! empty( $result['success'] ) && ! empty( $result['data'] ) ) {
-            return rest_ensure_response( $result['data'] );
-        }
-    }
+    $limit = absint( $request->get_param( 'limit' ) ) ?: 50;
 
     if ( $user_id > 0 ) {
-        $transactions = scp_get_user_transactions( $user_id, $limit ?: 50 );
-        return rest_ensure_response( [ 'fallback' => true, 'transactions' => $transactions ] );
+        $rows = scp_get_user_transactions( $user_id, $limit );
+        $transactions = array_map( 'scp_format_transaction_for_rest', $rows );
+        return rest_ensure_response( [ 'transactions' => $transactions ] );
     }
 
-    return rest_ensure_response( [ 'message' => 'No transactions available.' ] );
+    return rest_ensure_response( [ 'transactions' => [] ] );
 }
 
 function scp_rest_transaction_list( $request ) {
