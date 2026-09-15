@@ -126,7 +126,7 @@ function scp_register_rest_routes() {
         'callback'            => 'scp_rest_wallet_deposit',
         'permission_callback' => 'scp_rest_permission_logged_in',
         'args'                => [
-            'amount'       => [ 'required' => false, 'sanitize_callback' => 'floatval' ],
+            'amount'       => [ 'required' => false, 'sanitize_callback' => 'scp_rest_sanitize_float' ],
             'amountCents'  => [ 'required' => false, 'sanitize_callback' => 'absint' ],
             'amount_cents' => [ 'required' => false, 'sanitize_callback' => 'absint' ],
             'currency'     => [ 'required' => false, 'default' => 'USD', 'sanitize_callback' => 'sanitize_text_field' ],
@@ -151,7 +151,7 @@ function scp_register_rest_routes() {
         'callback'            => 'scp_rest_wallet_withdraw',
         'permission_callback' => 'scp_rest_permission_logged_in',
         'args'                => [
-            'amount'         => [ 'required' => true, 'sanitize_callback' => 'floatval' ],
+            'amount'         => [ 'required' => true, 'sanitize_callback' => 'scp_rest_sanitize_float' ],
             'currency'       => [ 'required' => false, 'default' => 'USD', 'sanitize_callback' => 'sanitize_text_field' ],
             'withdrawal_id'  => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
             'player_id'      => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
@@ -201,6 +201,21 @@ function scp_register_rest_routes() {
             'player_id' => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
         ],
     ] );
+}
+
+/**
+ * REST sanitize callback for float args.
+ *
+ * Native floatval() only accepts one argument. WordPress REST sanitizers
+ * are invoked as callback( $value, $request, $param ), which fatals on PHP 8+.
+ *
+ * @param mixed           $value   Raw request value.
+ * @param WP_REST_Request $request Request object.
+ * @param string          $param  Parameter name.
+ * @return float
+ */
+function scp_rest_sanitize_float( $value, $request = null, $param = '' ) {
+    return (float) $value;
 }
 
 function scp_rest_permission_logged_in() {
