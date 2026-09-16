@@ -63,10 +63,15 @@ function scp_default_deposit_destinations() {
             'enabled' => 1,
             'label'   => 'USDT BEP20',
             'USDT'    => array(
-                'label'    => 'USDT.BEP20',
-                'standard' => 'BEP-20',
-                'network'  => 'BNB Smart Chain',
-                'address'  => '',
+                'label'             => 'USDT.BEP20',
+                'standard'          => 'BEP-20',
+                'network'           => 'BNB Smart Chain',
+                'address'           => '',
+                'rpc_url'           => 'https://bsc-dataseed.binance.org',
+                'contract'          => '0x55d398326f99059fF775485246999027B3197955',
+                'decimals'          => 18,
+                'min_confirmations' => 3,
+                'private_key'      => '',
             ),
             'USDC'    => array(
                 'label'    => 'USDC.ERC20',
@@ -98,20 +103,6 @@ function scp_default_deposit_destinations() {
             'label'        => 'Credit / Debit',
             'instructions' => 'Card payments are processed with Stripe. Configure publishable and secret keys under ScorpioPlay → Settings.',
         ),
-        'withdraw' => array(
-            'bank'   => array(
-                'enabled' => 1,
-                'label'   => 'Bank transfer',
-            ),
-            'crypto' => array(
-                'enabled' => 1,
-                'label'   => 'USDT BEP20',
-            ),
-            'paypal' => array(
-                'enabled' => 1,
-                'label'   => 'PayPal',
-            ),
-        ),
     );
 }
 
@@ -131,17 +122,6 @@ function scp_merge_deposit_destinations( $saved ) {
     foreach ( array( 'bank', 'paypal', 'card' ) as $method ) {
         if ( isset( $saved[ $method ] ) && is_array( $saved[ $method ] ) ) {
             $defaults[ $method ] = array_merge( $defaults[ $method ], $saved[ $method ] );
-        }
-    }
-
-    if ( isset( $saved['withdraw'] ) && is_array( $saved['withdraw'] ) ) {
-        foreach ( array( 'bank', 'crypto', 'paypal' ) as $method ) {
-            if ( isset( $saved['withdraw'][ $method ] ) && is_array( $saved['withdraw'][ $method ] ) ) {
-                $defaults['withdraw'][ $method ] = array_merge(
-                    $defaults['withdraw'][ $method ],
-                    $saved['withdraw'][ $method ]
-                );
-            }
         }
     }
 
@@ -194,53 +174,36 @@ function scp_sanitize_deposit_destinations( $input ) {
         $out['crypto'][ $coin ]['address']  = sanitize_text_field( $row['address'] ?? '' );
     }
 
+    $usdt = isset( $input['crypto']['USDT'] ) && is_array( $input['crypto']['USDT'] ) ? $input['crypto']['USDT'] : array();
+    $out['crypto']['USDT']['rpc_url'] = esc_url_raw( $usdt['rpc_url'] ?? $defaults['crypto']['USDT']['rpc_url'] );
+    if ( $out['crypto']['USDT']['rpc_url'] === '' ) {
+        $out['crypto']['USDT']['rpc_url'] = $defaults['crypto']['USDT']['rpc_url'];
+    }
+    $out['crypto']['USDT']['contract'] = sanitize_text_field( $usdt['contract'] ?? $defaults['crypto']['USDT']['contract'] );
+    $out['crypto']['USDT']['decimals']  = max( 0, absint( $usdt['decimals'] ?? $defaults['crypto']['USDT']['decimals'] ) );
+    $out['crypto']['USDT']['min_confirmations'] = max( 0, absint( $usdt['min_confirmations'] ?? $defaults['crypto']['USDT']['min_confirmations'] ) );
+
+    $saved       = get_option( 'scp_deposit_destinations', array() );
+    $existing_pk = '';
+    if ( is_array( $saved ) && ! empty( $saved['crypto']['USDT']['private_key'] ) ) {
+        $existing_pk = $saved['crypto']['USDT']['private_key'];
+    }
+    $incoming_pk = function_exists( 'scp_bep20_sanitize_private_key' )
+        ? scp_bep20_sanitize_private_key( $usdt['private_key'] ?? '' )
+        : '';
+    if ( $incoming_pk !== '' ) {
+        $encrypted = scp_bep20_encrypt_key( $incoming_pk );
+        $out['crypto']['USDT']['private_key'] = $encrypted;
+        update_option( 'scp_bep20_private_key', $encrypted, false );
+    } else {
+        $out['crypto']['USDT']['private_key'] = $existing_pk;
+    }
+
     $out['paypal']['email']        = sanitize_email( $input['paypal']['email'] ?? '' );
     $out['paypal']['instructions'] = sanitize_textarea_field( $input['paypal']['instructions'] ?? '' );
     $out['card']['instructions']   = sanitize_textarea_field( $input['card']['instructions'] ?? '' );
 
-    foreach ( array( 'bank', 'crypto', 'paypal' ) as $method ) {
-        $row = isset( $input['withdraw'][ $method ] ) && is_array( $input['withdraw'][ $method ] )
-            ? $input['withdraw'][ $method ]
-            : array();
-        $out['withdraw'][ $method ]['enabled'] = ! empty( $row['enabled'] ) ? 1 : 0;
-        if ( isset( $row['label'] ) ) {
-            $out['withdraw'][ $method ]['label'] = sanitize_text_field( $row['label'] );
-        }
-    }
-
     return $out;
-}
-
-function scp_get_withdraw_methods() {
-    $destinations = scp_get_deposit_destinations();
-    return isset( $destinations['withdraw'] ) && is_array( $destinations['withdraw'] )
-        ? $destinations['withdraw']
-        : scp_default_deposit_destinations()['withdraw'];
-}
-
-function scp_format_withdraw_destinations_payload() {
-    $methods = scp_get_withdraw_methods();
-    $out     = array();
-
-    foreach ( array( 'bank', 'crypto', 'paypal' ) as $id ) {
-        $out[] = array(
-            'id'      => $id,
-            'label'   => (string) ( $methods[ $id ]['label'] ?? $id ),
-            'enabled' => ! empty( $methods[ $id ]['enabled'] ),
-        );
-    }
-
-    return array(
-        'methods'    => $out,
-        'banks'      => array(
-            array( 'id' => 'khan', 'label' => 'Khan Bank' ),
-            array( 'id' => 'golomt', 'label' => 'Golomt Bank' ),
-            array( 'id' => 'tdb', 'label' => 'Trade and Development Bank' ),
-            array( 'id' => 'xac', 'label' => 'XacBank' ),
-            array( 'id' => 'state', 'label' => 'State Bank' ),
-        ),
-        'currencies' => array( 'USD', 'MNT', 'USDT' ),
-    );
 }
 
 function scp_split_instruction_lines( $text ) {
@@ -286,7 +249,9 @@ function scp_format_deposit_destinations_payload() {
             'instructions'  => scp_split_instruction_lines( $d['bank']['instructions'] ?? '' ),
         ),
         'crypto'  => array(
-            'networks' => $networks,
+            'networks'              => $networks,
+            'payoutEnabled'         => class_exists( 'SCP_BEP20_Wallet' ) ? SCP_BEP20_Wallet::is_ready_to_send() : false,
+            'depositVerifyEnabled' => class_exists( 'SCP_BEP20_Wallet' ) ? SCP_BEP20_Wallet::is_ready_to_verify() : false,
         ),
         'paypal'  => array(
             'email'        => (string) ( $d['paypal']['email'] ?? '' ),
@@ -307,6 +272,69 @@ function scp_rest_wallet_deposit_destinations() {
     );
 }
 
+function scp_default_withdraw_banks() {
+    return array(
+        array( 'id' => 'khan', 'label' => 'Khan Bank' ),
+        array( 'id' => 'golomt', 'label' => 'Golomt Bank' ),
+        array( 'id' => 'tdb', 'label' => 'Trade and Development Bank' ),
+        array( 'id' => 'xac', 'label' => 'XacBank' ),
+        array( 'id' => 'state', 'label' => 'State Bank' ),
+    );
+}
+
+function scp_format_withdraw_destinations_payload() {
+    $d = scp_get_deposit_destinations();
+
+    $crypto_label = (string) ( $d['crypto']['label'] ?? 'USDT BEP20' );
+    $methods      = array(
+        array(
+            'id'      => 'bank',
+            'label'   => (string) ( $d['bank']['label'] ?? 'Bank transfer' ),
+            'enabled' => ! empty( $d['bank']['enabled'] ),
+        ),
+        array(
+            'id'      => 'crypto',
+            'label'   => $crypto_label !== '' ? $crypto_label : 'USDT BEP20',
+            'enabled' => ! empty( $d['crypto']['enabled'] ),
+        ),
+        array(
+            'id'      => 'paypal',
+            'label'   => (string) ( $d['paypal']['label'] ?? 'PayPal' ),
+            'enabled' => ! empty( $d['paypal']['enabled'] ),
+        ),
+    );
+
+    $banks      = scp_default_withdraw_banks();
+    $bank_name  = trim( (string) ( $d['bank']['bank_name'] ?? '' ) );
+    if ( $bank_name !== '' ) {
+        $matched = false;
+        foreach ( $banks as $i => $bank ) {
+            if ( strcasecmp( $bank['label'], $bank_name ) === 0 || strcasecmp( $bank['id'], $bank_name ) === 0 ) {
+                $banks[ $i ]['label'] = $bank_name;
+                $matched = true;
+                break;
+            }
+        }
+        if ( ! $matched ) {
+            $banks[0]['label'] = $bank_name;
+        }
+    }
+
+    $currencies = array( 'USD' );
+    if ( ! empty( $d['bank']['enabled'] ) ) {
+        $currencies[] = 'MNT';
+    }
+    if ( ! empty( $d['crypto']['enabled'] ) ) {
+        $currencies[] = 'USDT';
+    }
+
+    return array(
+        'methods'    => $methods,
+        'banks'      => $banks,
+        'currencies' => array_values( array_unique( $currencies ) ),
+    );
+}
+
 function scp_rest_wallet_withdraw_destinations() {
     return rest_ensure_response(
         array(
@@ -324,13 +352,23 @@ function scp_render_deposit_destinations_page() {
     $d     = scp_get_deposit_destinations();
     $name  = 'scp_deposit_destinations';
     $coins = array( 'USDT', 'USDC', 'ETH', 'BTC' );
+    $payout_ready = class_exists( 'SCP_BEP20_Wallet' ) && SCP_BEP20_Wallet::is_ready_to_send();
     ?>
     <div class="wrap">
-        <h1>Payment Methods</h1>
+        <h1>Deposit Destinations</h1>
+        <?php if ( ! $payout_ready ) : ?>
+            <div class="notice notice-error">
+                <p>
+                    <strong>Crypto withdrawals are blocked.</strong>
+                    The USDT address above is only for receiving deposits.
+                    Paste the matching BEP-20 private key in the hot wallet section below, then save.
+                </p>
+            </div>
+        <?php endif; ?>
         <p>
-            Configure the deposit destinations players see in the wallet, and which
-            withdrawal methods they can request. After a player submits a request,
-            approve it under Deposits or Withdrawals — only then is Scorpio API called.
+            These are the operator receiving details shown in the wallet deposit menu.
+            Card checkout still uses Stripe keys from
+            <a href="<?php echo esc_url( admin_url( 'admin.php?page=scorpioplay' ) ); ?>">ScorpioPlay → Settings</a>.
         </p>
 
         <form method="post" action="options.php">
@@ -412,6 +450,50 @@ function scp_render_deposit_destinations_page() {
                 </tbody>
             </table>
 
+            <?php
+            $usdt_row = $d['crypto']['USDT'];
+            $has_pk   = function_exists( 'scp_bep20_has_private_key' ) && scp_bep20_has_private_key();
+            ?>
+            <h2>BEP-20 hot wallet (USDT payouts)</h2>
+            <p class="description" style="max-width: 960px;">
+                The wallet address in the USDT row is public (players send to it).
+                Withdrawals also need that wallet’s <strong>private key</strong> so the plugin can send USDT to the player.
+                Keep a little BNB in the wallet for gas.
+            </p>
+            <?php if ( $has_pk ) : ?>
+                <div class="notice notice-success inline"><p>Private key is saved. Crypto withdrawals can send on-chain.</p></div>
+            <?php endif; ?>
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th scope="row"><label for="scp-usdt-rpc">BSC RPC URL</label></th>
+                    <td>
+                        <input id="scp-usdt-rpc" type="url" class="regular-text" name="<?php echo esc_attr( $name ); ?>[crypto][USDT][rpc_url]" value="<?php echo esc_attr( $usdt_row['rpc_url'] ?? 'https://bsc-dataseed.binance.org' ); ?>" />
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="scp-usdt-contract">USDT contract</label></th>
+                    <td>
+                        <input id="scp-usdt-contract" type="text" class="regular-text" name="<?php echo esc_attr( $name ); ?>[crypto][USDT][contract]" value="<?php echo esc_attr( $usdt_row['contract'] ?? '0x55d398326f99059fF775485246999027B3197955' ); ?>" />
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="scp-usdt-conf">Min confirmations</label></th>
+                    <td>
+                        <input id="scp-usdt-conf" type="number" class="small-text" min="0" name="<?php echo esc_attr( $name ); ?>[crypto][USDT][min_confirmations]" value="<?php echo esc_attr( (int) ( $usdt_row['min_confirmations'] ?? 3 ) ); ?>" />
+                        <p class="description">Required BSC confirmations before a crypto deposit is credited.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="scp-usdt-pk">Private key</label></th>
+                    <td>
+                        <input id="scp-usdt-pk" type="password" class="regular-text" name="<?php echo esc_attr( $name ); ?>[crypto][USDT][private_key]" value="" autocomplete="new-password" placeholder="<?php echo $has_pk ? 'Saved — leave blank to keep' : '0x… 64 hex chars'; ?>" />
+                        <p class="description">
+                            <?php echo $has_pk ? 'A private key is saved (encrypted). Leave blank to keep it.' : 'Required to send withdrawals. Never share this key.'; ?>
+                        </p>
+                    </td>
+                </tr>
+            </table>
+
             <h2>PayPal</h2>
             <table class="form-table" role="presentation">
                 <tr>
@@ -464,24 +546,7 @@ function scp_render_deposit_destinations_page() {
                 </tr>
             </table>
 
-            <h2>Withdrawal methods</h2>
-            <p class="description">These methods appear in the wallet withdraw tab. Destination details are entered by the player.</p>
-            <table class="form-table" role="presentation">
-                <?php foreach ( array( 'bank' => 'Bank transfer', 'crypto' => 'Crypto', 'paypal' => 'PayPal' ) as $wid => $wlabel ) : ?>
-                    <tr>
-                        <th scope="row"><?php echo esc_html( $wlabel ); ?></th>
-                        <td>
-                            <label>
-                                <input type="checkbox" name="<?php echo esc_attr( $name ); ?>[withdraw][<?php echo esc_attr( $wid ); ?>][enabled]" value="1" <?php checked( ! empty( $d['withdraw'][ $wid ]['enabled'] ) ); ?> />
-                                Enable
-                            </label>
-                            <input type="text" class="regular-text" style="margin-left:12px;" name="<?php echo esc_attr( $name ); ?>[withdraw][<?php echo esc_attr( $wid ); ?>][label]" value="<?php echo esc_attr( $d['withdraw'][ $wid ]['label'] ); ?>" />
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-            </table>
-
-            <?php submit_button( 'Save payment methods' ); ?>
+            <?php submit_button( 'Save destinations' ); ?>
         </form>
     </div>
     <?php
