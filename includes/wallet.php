@@ -174,7 +174,23 @@ function scp_ajax_request_withdrawal() {
     $player_id  = get_user_meta( $user_id, 'scp_player_id', true );
     $player_login = wp_get_current_user()->user_login ?: $player_id;
 
-    $tx_id = scp_add_transaction( $user_id, $player_login, 'withdrawal', $amount, 'USD', 'pending', '', '', null );
+    $tx_id = scp_create_pending_wallet_request(
+        $user_id,
+        $player_login,
+        'withdraw',
+        $amount,
+        'USD',
+        array(
+            'method'      => 'bank',
+            'destination' => array(
+                'method'      => 'bank',
+                'accountName' => '',
+                'accountNumber' => $details,
+                'bankName'    => '',
+            ),
+            'source'      => 'shortcode',
+        )
+    );
 
     wp_send_json_success( [ 'message' => 'Request submitted', 'transaction_id' => $tx_id ] );
 }

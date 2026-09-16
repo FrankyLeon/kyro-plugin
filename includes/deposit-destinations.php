@@ -28,6 +28,16 @@ function scp_register_deposit_destinations_route() {
             'permission_callback' => 'scp_rest_permission_logged_in',
         )
     );
+
+    register_rest_route(
+        'scp/v1',
+        '/wallet/withdraw-destinations',
+        array(
+            'methods'             => 'GET',
+            'callback'            => 'scp_rest_wallet_withdraw_destinations',
+            'permission_callback' => 'scp_rest_permission_logged_in',
+        )
+    );
 }
 
 function scp_default_deposit_destinations() {
@@ -88,6 +98,20 @@ function scp_default_deposit_destinations() {
             'label'        => 'Credit / Debit',
             'instructions' => 'Card payments are processed with Stripe. Configure publishable and secret keys under ScorpioPlay → Settings.',
         ),
+        'withdraw' => array(
+            'bank'   => array(
+                'enabled' => 1,
+                'label'   => 'Bank transfer',
+            ),
+            'crypto' => array(
+                'enabled' => 1,
+                'label'   => 'USDT BEP20',
+            ),
+            'paypal' => array(
+                'enabled' => 1,
+                'label'   => 'PayPal',
+            ),
+        ),
     );
 }
 
@@ -107,6 +131,17 @@ function scp_merge_deposit_destinations( $saved ) {
     foreach ( array( 'bank', 'paypal', 'card' ) as $method ) {
         if ( isset( $saved[ $method ] ) && is_array( $saved[ $method ] ) ) {
             $defaults[ $method ] = array_merge( $defaults[ $method ], $saved[ $method ] );
+        }
+    }
+
+    if ( isset( $saved['withdraw'] ) && is_array( $saved['withdraw'] ) ) {
+        foreach ( array( 'bank', 'crypto', 'paypal' ) as $method ) {
+            if ( isset( $saved['withdraw'][ $method ] ) && is_array( $saved['withdraw'][ $method ] ) ) {
+                $defaults['withdraw'][ $method ] = array_merge(
+                    $defaults['withdraw'][ $method ],
+                    $saved['withdraw'][ $method ]
+                );
+            }
         }
     }
 
@@ -163,7 +198,49 @@ function scp_sanitize_deposit_destinations( $input ) {
     $out['paypal']['instructions'] = sanitize_textarea_field( $input['paypal']['instructions'] ?? '' );
     $out['card']['instructions']   = sanitize_textarea_field( $input['card']['instructions'] ?? '' );
 
+    foreach ( array( 'bank', 'crypto', 'paypal' ) as $method ) {
+        $row = isset( $input['withdraw'][ $method ] ) && is_array( $input['withdraw'][ $method ] )
+            ? $input['withdraw'][ $method ]
+            : array();
+        $out['withdraw'][ $method ]['enabled'] = ! empty( $row['enabled'] ) ? 1 : 0;
+        if ( isset( $row['label'] ) ) {
+            $out['withdraw'][ $method ]['label'] = sanitize_text_field( $row['label'] );
+        }
+    }
+
     return $out;
+}
+
+function scp_get_withdraw_methods() {
+    $destinations = scp_get_deposit_destinations();
+    return isset( $destinations['withdraw'] ) && is_array( $destinations['withdraw'] )
+        ? $destinations['withdraw']
+        : scp_default_deposit_destinations()['withdraw'];
+}
+
+function scp_format_withdraw_destinations_payload() {
+    $methods = scp_get_withdraw_methods();
+    $out     = array();
+
+    foreach ( array( 'bank', 'crypto', 'paypal' ) as $id ) {
+        $out[] = array(
+            'id'      => $id,
+            'label'   => (string) ( $methods[ $id ]['label'] ?? $id ),
+            'enabled' => ! empty( $methods[ $id ]['enabled'] ),
+        );
+    }
+
+    return array(
+        'methods'    => $out,
+        'banks'      => array(
+            array( 'id' => 'khan', 'label' => 'Khan Bank' ),
+            array( 'id' => 'golomt', 'label' => 'Golomt Bank' ),
+            array( 'id' => 'tdb', 'label' => 'Trade and Development Bank' ),
+            array( 'id' => 'xac', 'label' => 'XacBank' ),
+            array( 'id' => 'state', 'label' => 'State Bank' ),
+        ),
+        'currencies' => array( 'USD', 'MNT', 'USDT' ),
+    );
 }
 
 function scp_split_instruction_lines( $text ) {
@@ -230,6 +307,15 @@ function scp_rest_wallet_deposit_destinations() {
     );
 }
 
+function scp_rest_wallet_withdraw_destinations() {
+    return rest_ensure_response(
+        array(
+            'success' => true,
+            'data'    => scp_format_withdraw_destinations_payload(),
+        )
+    );
+}
+
 function scp_render_deposit_destinations_page() {
     if ( ! current_user_can( 'manage_options' ) ) {
         return;
@@ -240,11 +326,11 @@ function scp_render_deposit_destinations_page() {
     $coins = array( 'USDT', 'USDC', 'ETH', 'BTC' );
     ?>
     <div class="wrap">
-        <h1>Deposit Destinations</h1>
+        <h1>Payment Methods</h1>
         <p>
-            These are the operator receiving details shown in the wallet deposit menu.
-            Card checkout still uses Stripe keys from
-            <a href="<?php echo esc_url( admin_url( 'admin.php?page=scorpioplay' ) ); ?>">ScorpioPlay → Settings</a>.
+            Configure the deposit destinations players see in the wallet, and which
+            withdrawal methods they can request. After a player submits a request,
+            approve it under Deposits or Withdrawals — only then is Scorpio API called.
         </p>
 
         <form method="post" action="options.php">
@@ -378,7 +464,24 @@ function scp_render_deposit_destinations_page() {
                 </tr>
             </table>
 
-            <?php submit_button( 'Save destinations' ); ?>
+            <h2>Withdrawal methods</h2>
+            <p class="description">These methods appear in the wallet withdraw tab. Destination details are entered by the player.</p>
+            <table class="form-table" role="presentation">
+                <?php foreach ( array( 'bank' => 'Bank transfer', 'crypto' => 'Crypto', 'paypal' => 'PayPal' ) as $wid => $wlabel ) : ?>
+                    <tr>
+                        <th scope="row"><?php echo esc_html( $wlabel ); ?></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" name="<?php echo esc_attr( $name ); ?>[withdraw][<?php echo esc_attr( $wid ); ?>][enabled]" value="1" <?php checked( ! empty( $d['withdraw'][ $wid ]['enabled'] ) ); ?> />
+                                Enable
+                            </label>
+                            <input type="text" class="regular-text" style="margin-left:12px;" name="<?php echo esc_attr( $name ); ?>[withdraw][<?php echo esc_attr( $wid ); ?>][label]" value="<?php echo esc_attr( $d['withdraw'][ $wid ]['label'] ); ?>" />
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+            </table>
+
+            <?php submit_button( 'Save payment methods' ); ?>
         </form>
     </div>
     <?php
@@ -388,5 +491,12 @@ add_action( 'wp_ajax_scp_wallet_deposit_destinations', function() {
     $request = new WP_REST_Request( 'GET', '/scp/v1/wallet/deposit-destinations' );
     scp_api_ajax_response( function() use ( $request ) {
         return scp_rest_wallet_deposit_destinations( $request );
+    } );
+} );
+
+add_action( 'wp_ajax_scp_wallet_withdraw_destinations', function() {
+    $request = new WP_REST_Request( 'GET', '/scp/v1/wallet/withdraw-destinations' );
+    scp_api_ajax_response( function() use ( $request ) {
+        return scp_rest_wallet_withdraw_destinations( $request );
     } );
 } );
