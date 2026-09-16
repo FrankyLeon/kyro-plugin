@@ -11,6 +11,9 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 define( 'SCP_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'SCP_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 
+require_once SCP_PLUGIN_DIR . 'includes/env.php';
+scp_load_dotenv();
+
 // Autoload classes (optional, we'll include manually for now)
 require_once SCP_PLUGIN_DIR . 'includes/class-scp-api-client.php';
 require_once SCP_PLUGIN_DIR . 'includes/admin-settings.php';

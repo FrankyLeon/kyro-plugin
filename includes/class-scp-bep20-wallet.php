@@ -8,8 +8,34 @@ class SCP_BEP20_Wallet {
     const USDT_CONTRACT  = '0x55d398326f99059ff775485246999027b3197955';
     const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
     const DEFAULT_RPC   = 'https://bsc-dataseed.binance.org';
+    const TESTNET_RPC    = 'https://bsc-testnet-rpc.publicnode.com';
     const DECIMALS      = 18;
     const GAS_LIMIT      = '0x186a0';
+
+    public static function mode() {
+        if ( defined( 'SCP_BEP20_MODE' ) ) {
+            $mode = strtolower( trim( (string) SCP_BEP20_MODE ) );
+            if ( in_array( $mode, array( 'test', 'testing', 'dev', 'sandbox', 'simulate', 'fake' ), true ) ) {
+                return 'test';
+            }
+            if ( $mode === 'testnet' ) {
+                return 'testnet';
+            }
+            return 'live';
+        }
+        if ( function_exists( 'scp_bep20_mode' ) ) {
+            return scp_bep20_mode();
+        }
+        return 'test';
+    }
+
+    public static function is_simulate() {
+        return self::mode() === 'test';
+    }
+
+    public static function fake_tx_hash( $seed = '' ) {
+        return '0x' . hash( 'sha256', 'scp-bep20-test|' . $seed . '|' . microtime( true ) . '|' . wp_generate_password( 16, false ) );
+    }
 
     public static function settings() {
         $dest    = function_exists( 'scp_get_deposit_destinations' ) ? scp_get_deposit_destinations() : array();
@@ -20,10 +46,54 @@ class SCP_BEP20_Wallet {
             $address = self::normalize_address( SCP_Secp256k1::private_to_address( $private ) );
         }
 
+        $mode = self::mode();
+        if ( $mode === 'testnet' ) {
+            $rpc      = self::TESTNET_RPC;
+            $contract  = self::USDT_CONTRACT;
+            $chain_id  = 97;
+            $label     = 'BNB Smart Chain Testnet';
+        } elseif ( $mode === 'test' ) {
+            $rpc      = self::TESTNET_RPC;
+            $contract  = self::USDT_CONTRACT;
+            $chain_id  = 97;
+            $label     = 'Test (simulated USDT)';
+        } else {
+            $rpc      = self::DEFAULT_RPC;
+            $contract  = self::USDT_CONTRACT;
+            $chain_id  = self::CHAIN_ID;
+            $label     = 'BNB Smart Chain';
+        }
+
+        $env_rpc      = function_exists( 'scp_env' ) ? scp_env( 'SCP_BEP20_RPC_URL', '' ) : '';
+        $env_contract  = function_exists( 'scp_env' ) ? scp_env( 'SCP_BEP20_USDT_CONTRACT', '' ) : '';
+        $env_chain     = function_exists( 'scp_env' ) ? scp_env( 'SCP_BEP20_CHAIN_ID', '' ) : '';
+
+        if ( $env_rpc !== '' ) {
+            $rpc = $env_rpc;
+        } elseif ( $mode === 'live' && ! empty( $usdt['rpc_url'] ) ) {
+            $rpc = $usdt['rpc_url'];
+        } elseif ( $mode === 'testnet' && ! empty( $usdt['rpc_url'] ) ) {
+            $rpc = $usdt['rpc_url'];
+        }
+
+        if ( $env_contract !== '' ) {
+            $contract = $env_contract;
+        } elseif ( ! empty( $usdt['contract'] ) && $mode !== 'test' ) {
+            $contract = $usdt['contract'];
+        }
+
+        if ( $env_chain !== '' && absint( $env_chain ) > 0 ) {
+            $chain_id = absint( $env_chain );
+        }
+
         return array(
+            'mode'              => $mode,
+            'simulate'          => $mode === 'test',
+            'network_label'     => $label,
+            'chain_id'          => (int) $chain_id,
             'address'           => $address,
-            'rpc_url'           => esc_url_raw( $usdt['rpc_url'] ?? '' ) ?: self::DEFAULT_RPC,
-            'contract'          => self::normalize_address( $usdt['contract'] ?? self::USDT_CONTRACT ) ?: self::USDT_CONTRACT,
+            'rpc_url'           => esc_url_raw( $rpc ) ?: self::DEFAULT_RPC,
+            'contract'          => self::normalize_address( $contract ) ?: self::USDT_CONTRACT,
             'decimals'          => max( 0, (int) ( $usdt['decimals'] ?? self::DECIMALS ) ),
             'min_confirmations' => max( 0, (int) ( $usdt['min_confirmations'] ?? 3 ) ),
             'private_key'      => $private,
@@ -32,7 +102,13 @@ class SCP_BEP20_Wallet {
 
     public static function is_ready_to_send() {
         $s = self::settings();
-        return $s['address'] !== '' && $s['private_key'] !== '' && SCP_Eth_Math::available();
+        if ( $s['address'] === '' ) {
+            return false;
+        }
+        if ( ! empty( $s['simulate'] ) ) {
+            return true;
+        }
+        return $s['private_key'] !== '' && SCP_Eth_Math::available();
     }
 
     public static function is_ready_to_verify() {
@@ -41,17 +117,10 @@ class SCP_BEP20_Wallet {
     }
 
     public static function transfer_usdt( $destination, $amount ) {
-        if ( ! SCP_Eth_Math::available() ) {
-            return self::fail( 'PHP GMP or BCMath is required to send BEP-20 USDT.' );
-        }
-
         $s           = self::settings();
         $destination = self::normalize_address( $destination );
         $amount      = (float) $amount;
 
-        if ( $s['private_key'] === '' ) {
-            return self::fail( 'BEP-20 private key is not configured. Add it under Deposit Destinations.' );
-        }
         if ( $s['address'] === '' ) {
             return self::fail( 'BEP-20 wallet address is not configured.' );
         }
@@ -65,9 +134,30 @@ class SCP_BEP20_Wallet {
             return self::fail( 'Withdrawal amount must be greater than zero.' );
         }
 
+        if ( ! empty( $s['simulate'] ) ) {
+            return array(
+                'success'   => true,
+                'txHash'    => self::fake_tx_hash( $destination . '|' . $amount ),
+                'from'      => $s['address'],
+                'to'        => $destination,
+                'amount'    => $amount,
+                'network'   => $s['network_label'],
+                'mode'      => 'test',
+                'simulated' => true,
+            );
+        }
+
+        if ( ! SCP_Eth_Math::available() ) {
+            return self::fail( 'PHP GMP or BCMath is required to send BEP-20 USDT.' );
+        }
+
+        if ( $s['private_key'] === '' ) {
+            return self::fail( 'BEP-20 private key is not configured. Add it under Deposit Destinations.' );
+        }
+
         $derived = SCP_Secp256k1::private_to_address( $s['private_key'] );
         if ( $derived && strtolower( $derived ) !== strtolower( $s['address'] ) ) {
-            return self::fail( 'BEP-20 private key does not match the registered USDT wallet address.' );
+            return self::fail( 'BEP-20 private key does not match the registered USDT wallet address. Current mode is ' . $s['mode'] . '. Set define( \'SCP_BEP20_MODE\', \'test\' ); in wp-config.php for fake USDT.' );
         }
 
         $wei = self::to_token_units( $amount, $s['decimals'] );
@@ -105,7 +195,7 @@ class SCP_BEP20_Wallet {
             '0x0',
             $data,
             $s['private_key'],
-            self::CHAIN_ID
+            (int) $s['chain_id']
         );
         if ( $raw === '' ) {
             return self::fail( 'Unable to sign the BEP-20 transfer.' );
@@ -149,6 +239,28 @@ class SCP_BEP20_Wallet {
         if ( $s['address'] === '' ) {
             return self::fail( 'Operator BEP-20 address is not configured.' );
         }
+
+        if ( ! empty( $s['simulate'] ) ) {
+            if ( $expected <= 0 ) {
+                return self::fail( 'Deposit amount must be greater than zero.' );
+            }
+            if ( $tx_hash === '' ) {
+                $tx_hash = self::fake_tx_hash( $from . '|' . $expected );
+            }
+            return array(
+                'success'       => true,
+                'txHash'        => $tx_hash,
+                'from'          => $from ?: $s['address'],
+                'to'            => $s['address'],
+                'amount'        => $expected,
+                'onChainAmount' => $expected,
+                'network'       => $s['network_label'],
+                'asset'         => 'USDT',
+                'mode'          => 'test',
+                'simulated'     => true,
+            );
+        }
+
         if ( $tx_hash === '' ) {
             return self::fail( 'A BNB Smart Chain transaction hash is required.' );
         }

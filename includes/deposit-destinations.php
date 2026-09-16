@@ -67,6 +67,7 @@ function scp_default_deposit_destinations() {
                 'standard'          => 'BEP-20',
                 'network'           => 'BNB Smart Chain',
                 'address'           => '',
+                'mode'              => 'live',
                 'rpc_url'           => 'https://bsc-dataseed.binance.org',
                 'contract'          => '0x55d398326f99059fF775485246999027B3197955',
                 'decimals'          => 18,
@@ -175,6 +176,8 @@ function scp_sanitize_deposit_destinations( $input ) {
     }
 
     $usdt = isset( $input['crypto']['USDT'] ) && is_array( $input['crypto']['USDT'] ) ? $input['crypto']['USDT'] : array();
+    $out['crypto']['USDT']['mode'] = function_exists( 'scp_bep20_mode' ) ? scp_bep20_mode() : 'test';
+
     $out['crypto']['USDT']['rpc_url'] = esc_url_raw( $usdt['rpc_url'] ?? $defaults['crypto']['USDT']['rpc_url'] );
     if ( $out['crypto']['USDT']['rpc_url'] === '' ) {
         $out['crypto']['USDT']['rpc_url'] = $defaults['crypto']['USDT']['rpc_url'];
@@ -252,6 +255,8 @@ function scp_format_deposit_destinations_payload() {
             'networks'              => $networks,
             'payoutEnabled'         => class_exists( 'SCP_BEP20_Wallet' ) ? SCP_BEP20_Wallet::is_ready_to_send() : false,
             'depositVerifyEnabled' => class_exists( 'SCP_BEP20_Wallet' ) ? SCP_BEP20_Wallet::is_ready_to_verify() : false,
+            'mode'                 => class_exists( 'SCP_BEP20_Wallet' ) ? SCP_BEP20_Wallet::mode() : 'live',
+            'simulated'            => class_exists( 'SCP_BEP20_Wallet' ) && SCP_BEP20_Wallet::is_simulate(),
         ),
         'paypal'  => array(
             'email'        => (string) ( $d['paypal']['email'] ?? '' ),
@@ -353,9 +358,28 @@ function scp_render_deposit_destinations_page() {
     $name  = 'scp_deposit_destinations';
     $coins = array( 'USDT', 'USDC', 'ETH', 'BTC' );
     $payout_ready = class_exists( 'SCP_BEP20_Wallet' ) && SCP_BEP20_Wallet::is_ready_to_send();
+    $bep20_mode  = function_exists( 'scp_bep20_mode' ) ? scp_bep20_mode() : 'test';
     ?>
     <div class="wrap">
         <h1>Deposit Destinations</h1>
+        <?php if ( $bep20_mode === 'test' ) : ?>
+            <div class="notice notice-warning">
+                <p>
+                    <strong>BEP-20 is in test mode.</strong>
+                    Deposits and withdrawals use fake USDT (no real money).
+                    For production, add this to <code>wp-config.php</code> above <code>That’s all, stop editing!</code>:
+                </p>
+                <p><code>define( 'SCP_BEP20_MODE', 'live' );</code></p>
+            </div>
+        <?php elseif ( $bep20_mode === 'testnet' ) : ?>
+            <div class="notice notice-info">
+                <p><strong>BEP-20 is on BSC testnet.</strong> Set by <code>SCP_BEP20_MODE</code> in <code>wp-config.php</code>.</p>
+            </div>
+        <?php else : ?>
+            <div class="notice notice-success">
+                <p><strong>BEP-20 is in live mode.</strong> Withdrawals send real USDT on BNB Smart Chain.</p>
+            </div>
+        <?php endif; ?>
         <?php if ( ! $payout_ready ) : ?>
             <div class="notice notice-error">
                 <p>
@@ -464,6 +488,22 @@ function scp_render_deposit_destinations_page() {
                 <div class="notice notice-success inline"><p>Private key is saved. Crypto withdrawals can send on-chain.</p></div>
             <?php endif; ?>
             <table class="form-table" role="presentation">
+                <tr>
+                    <th scope="row">Mode</th>
+                    <td>
+                        <p>
+                            <strong><?php echo $bep20_mode === 'live' ? 'Live (real USDT)' : ( $bep20_mode === 'testnet' ? 'BSC testnet' : 'Test (fake USDT)' ); ?></strong>
+                        </p>
+                        <p class="description">
+                            Set this in <code>wp-config.php</code>, not here:
+                        </p>
+                        <pre style="background:#fff;border:1px solid #c3c4c7;padding:8px 12px;max-width:480px;">define( 'SCP_BEP20_MODE', '<?php echo esc_html( $bep20_mode ); ?>' );</pre>
+                        <p class="description">
+                            Use <code>'test'</code> while developing, <code>'live'</code> on production.
+                            If the constant is missing, the plugin stays in <strong>test</strong>.
+                        </p>
+                    </td>
+                </tr>
                 <tr>
                     <th scope="row"><label for="scp-usdt-rpc">BSC RPC URL</label></th>
                     <td>
