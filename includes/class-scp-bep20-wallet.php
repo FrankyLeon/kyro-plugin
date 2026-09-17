@@ -33,23 +33,27 @@ class SCP_BEP20_Wallet {
             $address = self::normalize_address( SCP_Secp256k1::private_to_address( $private ) );
         }
 
-        $rpc      = ! empty( $usdt['rpc_url'] ) ? $usdt['rpc_url'] : self::DEFAULT_RPC;
-        $contract  = ! empty( $usdt['contract'] ) ? $usdt['contract'] : self::USDT_CONTRACT;
-        $chain_id  = self::CHAIN_ID;
-        $label     = 'BNB Smart Chain';
+        $rpc     = ! empty( $usdt['rpc_url'] ) ? $usdt['rpc_url'] : self::DEFAULT_RPC;
+        $chain_id = self::CHAIN_ID;
+        $label    = 'BNB Smart Chain';
 
         $env_rpc      = function_exists( 'scp_env' ) ? scp_env( 'SCP_BEP20_RPC_URL', '' ) : '';
-        $env_contract  = function_exists( 'scp_env' ) ? scp_env( 'SCP_BEP20_USDT_CONTRACT', '' ) : '';
-        $env_chain     = function_exists( 'scp_env' ) ? scp_env( 'SCP_BEP20_CHAIN_ID', '' ) : '';
+        $env_contract = function_exists( 'scp_env' ) ? scp_env( 'SCP_BEP20_USDT_CONTRACT', '' ) : '';
+        $env_chain    = function_exists( 'scp_env' ) ? scp_env( 'SCP_BEP20_CHAIN_ID', '' ) : '';
 
         if ( $env_rpc !== '' ) {
             $rpc = $env_rpc;
         }
-        if ( $env_contract !== '' ) {
-            $contract = $env_contract;
+        if ( stripos( (string) $rpc, 'testnet' ) !== false ) {
+            $rpc = self::DEFAULT_RPC;
         }
         if ( $env_chain !== '' && absint( $env_chain ) > 0 ) {
             $chain_id = absint( $env_chain );
+        }
+
+        $contract = self::USDT_CONTRACT;
+        if ( $env_contract !== '' ) {
+            $contract = $env_contract;
         }
 
         return array(
@@ -60,7 +64,7 @@ class SCP_BEP20_Wallet {
             'address'           => $address,
             'rpc_url'           => esc_url_raw( $rpc ) ?: self::DEFAULT_RPC,
             'contract'          => self::normalize_address( $contract ) ?: self::USDT_CONTRACT,
-            'decimals'          => max( 0, (int) ( $usdt['decimals'] ?? self::DECIMALS ) ),
+            'decimals'          => self::DECIMALS,
             'min_confirmations' => max( 0, (int) ( $usdt['min_confirmations'] ?? 3 ) ),
             'private_key'      => $private,
         );
@@ -262,9 +266,10 @@ class SCP_BEP20_Wallet {
         }
 
         $transfer = self::find_usdt_transfer( $receipt_data['logs'] ?? array(), $s['contract'], $s['address'] );
-        if ( ! $transfer ) {
-            return self::fail( 'No USDT BEP-20 transfer to the operator wallet was found in this transaction.' );
+        if ( empty( $transfer['success'] ) ) {
+            return self::fail( $transfer['message'] ?? 'No USDT BEP-20 transfer to the operator wallet was found in this transaction.' );
         }
+        $transfer = $transfer['result'];
 
         if ( $from && strtolower( $transfer['from'] ) !== strtolower( $from ) ) {
             return self::fail( 'Transaction sender does not match the provided destination address.' );
@@ -347,37 +352,84 @@ class SCP_BEP20_Wallet {
         );
     }
 
-    private static function find_usdt_transfer( $logs, $contract, $operator ) {
-        if ( ! is_array( $logs ) ) {
-            return null;
+    private static function topic_address( $topic ) {
+        $hex = strtolower( preg_replace( '/^0x/i', '', (string) $topic ) );
+        if ( strlen( $hex ) < 40 ) {
+            return '';
         }
-        $contract = strtolower( $contract );
-        $operator = strtolower( $operator );
+        return self::normalize_address( '0x' . substr( $hex, -40 ) );
+    }
+
+    private static function parse_token_transfers( $logs ) {
+        $out = array();
+        if ( ! is_array( $logs ) ) {
+            return $out;
+        }
         foreach ( $logs as $log ) {
             if ( ! is_array( $log ) ) {
                 continue;
             }
-            $log_addr = strtolower( $log['address'] ?? '' );
-            if ( $log_addr !== $contract ) {
-                continue;
-            }
             $topics = $log['topics'] ?? array();
-            if ( empty( $topics[0] ) || strtolower( $topics[0] ) !== self::TRANSFER_TOPIC ) {
+            if ( ! is_array( $topics ) || empty( $topics[0] ) ) {
                 continue;
             }
-            $from = '0x' . substr( strtolower( $topics[1] ?? '' ), -40 );
-            $to   = '0x' . substr( strtolower( $topics[2] ?? '' ), -40 );
-            if ( $to !== $operator ) {
+            if ( strtolower( (string) $topics[0] ) !== self::TRANSFER_TOPIC ) {
                 continue;
             }
-            $amount_hex = $log['data'] ?? '0x0';
-            return array(
-                'from'   => $from,
-                'to'     => $to,
-                'amount' => SCP_Eth_Math::hex2dec( $amount_hex ),
+            $from = self::topic_address( $topics[1] ?? '' );
+            $to   = self::topic_address( $topics[2] ?? '' );
+            if ( $to === '' ) {
+                continue;
+            }
+            $out[] = array(
+                'contract' => self::normalize_address( $log['address'] ?? '' ),
+                'from'     => $from,
+                'to'       => $to,
+                'amount'   => SCP_Eth_Math::hex2dec( $log['data'] ?? '0x0' ),
             );
         }
-        return null;
+        return $out;
+    }
+
+    private static function find_usdt_transfer( $logs, $contract, $operator ) {
+        $contract = self::normalize_address( $contract );
+        $operator = self::normalize_address( $operator );
+        $transfers = self::parse_token_transfers( $logs );
+
+        foreach ( $transfers as $transfer ) {
+            if ( $transfer['contract'] === $contract && $transfer['to'] === $operator ) {
+                return array(
+                    'success' => true,
+                    'result'  => $transfer,
+                );
+            }
+        }
+
+        $usdt_elsewhere = array();
+        $other_tokens   = array();
+        foreach ( $transfers as $transfer ) {
+            $short_to = $transfer['to'] !== '' ? $transfer['to'] : 'unknown';
+            if ( $transfer['contract'] === $contract ) {
+                $amount = self::from_token_units( $transfer['amount'], self::DECIMALS );
+                $usdt_elsewhere[] = $amount . ' USDT to ' . $short_to;
+            } else {
+                $other_tokens[] = $transfer['contract'] . ' to ' . $short_to;
+            }
+        }
+
+        if ( ! empty( $usdt_elsewhere ) ) {
+            return self::fail(
+                'This transaction sent ' . implode( '; ', $usdt_elsewhere )
+                . '. Deposits must be sent to the operator wallet ' . $operator . '.'
+            );
+        }
+        if ( ! empty( $other_tokens ) ) {
+            return self::fail(
+                'This transaction transferred a different BEP-20 token, not USDT (' . self::USDT_CONTRACT . ').'
+            );
+        }
+
+        return self::fail( 'No USDT BEP-20 transfer to the operator wallet was found in this transaction.' );
     }
 
     private static function wait_for_receipt( $tx_hash, $tries = 20, $sleep_us = 1500000 ) {

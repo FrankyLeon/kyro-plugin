@@ -231,15 +231,24 @@ function scp_format_deposit_destinations_payload() {
         );
     }
 
+    $wallet = class_exists( 'SCP_BEP20_Wallet' ) ? SCP_BEP20_Wallet::settings() : array();
+
     $networks = array();
     foreach ( array( 'USDT', 'USDC', 'ETH', 'BTC' ) as $coin ) {
-        $row        = $d['crypto'][ $coin ];
+        $row     = $d['crypto'][ $coin ];
+        $address = (string) ( $row['address'] ?? '' );
+        if ( $coin === 'USDT' && ! empty( $wallet['address'] ) ) {
+            $address = $wallet['address'];
+        }
         $networks[] = array(
             'id'       => $coin,
             'label'    => (string) ( $row['label'] ?? $coin ),
             'standard' => (string) ( $row['standard'] ?? '' ),
             'network'  => (string) ( $row['network'] ?? '' ),
-            'address'  => (string) ( $row['address'] ?? '' ),
+            'address'  => $address,
+            'contract' => $coin === 'USDT' ? (string) ( $wallet['contract'] ?? '' ) : '',
+            'chainId'  => $coin === 'USDT' ? (int) ( $wallet['chain_id'] ?? 56 ) : 0,
+            'decimals' => $coin === 'USDT' ? (int) ( $wallet['decimals'] ?? 18 ) : 0,
         );
     }
 
@@ -253,6 +262,9 @@ function scp_format_deposit_destinations_payload() {
         ),
         'crypto'  => array(
             'networks'              => $networks,
+            'contract'              => (string) ( $wallet['contract'] ?? '' ),
+            'chainId'               => (int) ( $wallet['chain_id'] ?? 56 ),
+            'decimals'              => (int) ( $wallet['decimals'] ?? 18 ),
             'payoutEnabled'         => class_exists( 'SCP_BEP20_Wallet' ) ? SCP_BEP20_Wallet::is_ready_to_send() : false,
             'depositVerifyEnabled' => class_exists( 'SCP_BEP20_Wallet' ) ? SCP_BEP20_Wallet::is_ready_to_verify() : false,
             'mode'                 => class_exists( 'SCP_BEP20_Wallet' ) ? SCP_BEP20_Wallet::mode() : 'live',
@@ -478,7 +490,8 @@ function scp_render_deposit_destinations_page() {
                 <tr>
                     <th scope="row"><label for="scp-usdt-contract">USDT contract</label></th>
                     <td>
-                        <input id="scp-usdt-contract" type="text" class="regular-text" name="<?php echo esc_attr( $name ); ?>[crypto][USDT][contract]" value="<?php echo esc_attr( $usdt_row['contract'] ?? '0x55d398326f99059fF775485246999027B3197955' ); ?>" />
+                        <input id="scp-usdt-contract" type="text" class="regular-text" value="0x55d398326f99059fF775485246999027B3197955" readonly />
+                        <p class="description">Official Binance-Peg USDT on BNB Smart Chain. BscScan may label it BSC-USD / BUSD-T; the contract is still USDT.</p>
                     </td>
                 </tr>
                 <tr>
