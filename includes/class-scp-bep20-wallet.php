@@ -13,24 +13,11 @@ class SCP_BEP20_Wallet {
     const GAS_LIMIT      = '0x186a0';
 
     public static function mode() {
-        if ( defined( 'SCP_BEP20_MODE' ) ) {
-            $mode = strtolower( trim( (string) SCP_BEP20_MODE ) );
-            if ( in_array( $mode, array( 'test', 'testing', 'dev', 'sandbox', 'simulate', 'fake' ), true ) ) {
-                return 'test';
-            }
-            if ( $mode === 'testnet' ) {
-                return 'testnet';
-            }
-            return 'live';
-        }
-        if ( function_exists( 'scp_bep20_mode' ) ) {
-            return scp_bep20_mode();
-        }
-        return 'test';
+        return 'live';
     }
 
     public static function is_simulate() {
-        return self::mode() === 'test';
+        return false;
     }
 
     public static function fake_tx_hash( $seed = '' ) {
@@ -46,23 +33,10 @@ class SCP_BEP20_Wallet {
             $address = self::normalize_address( SCP_Secp256k1::private_to_address( $private ) );
         }
 
-        $mode = self::mode();
-        if ( $mode === 'testnet' ) {
-            $rpc      = self::TESTNET_RPC;
-            $contract  = self::USDT_CONTRACT;
-            $chain_id  = 97;
-            $label     = 'BNB Smart Chain Testnet';
-        } elseif ( $mode === 'test' ) {
-            $rpc      = self::TESTNET_RPC;
-            $contract  = self::USDT_CONTRACT;
-            $chain_id  = 97;
-            $label     = 'Test (simulated USDT)';
-        } else {
-            $rpc      = self::DEFAULT_RPC;
-            $contract  = self::USDT_CONTRACT;
-            $chain_id  = self::CHAIN_ID;
-            $label     = 'BNB Smart Chain';
-        }
+        $rpc      = ! empty( $usdt['rpc_url'] ) ? $usdt['rpc_url'] : self::DEFAULT_RPC;
+        $contract  = ! empty( $usdt['contract'] ) ? $usdt['contract'] : self::USDT_CONTRACT;
+        $chain_id  = self::CHAIN_ID;
+        $label     = 'BNB Smart Chain';
 
         $env_rpc      = function_exists( 'scp_env' ) ? scp_env( 'SCP_BEP20_RPC_URL', '' ) : '';
         $env_contract  = function_exists( 'scp_env' ) ? scp_env( 'SCP_BEP20_USDT_CONTRACT', '' ) : '';
@@ -70,25 +44,17 @@ class SCP_BEP20_Wallet {
 
         if ( $env_rpc !== '' ) {
             $rpc = $env_rpc;
-        } elseif ( $mode === 'live' && ! empty( $usdt['rpc_url'] ) ) {
-            $rpc = $usdt['rpc_url'];
-        } elseif ( $mode === 'testnet' && ! empty( $usdt['rpc_url'] ) ) {
-            $rpc = $usdt['rpc_url'];
         }
-
         if ( $env_contract !== '' ) {
             $contract = $env_contract;
-        } elseif ( ! empty( $usdt['contract'] ) && $mode !== 'test' ) {
-            $contract = $usdt['contract'];
         }
-
         if ( $env_chain !== '' && absint( $env_chain ) > 0 ) {
             $chain_id = absint( $env_chain );
         }
 
         return array(
-            'mode'              => $mode,
-            'simulate'          => $mode === 'test',
+            'mode'              => 'live',
+            'simulate'          => false,
             'network_label'     => $label,
             'chain_id'          => (int) $chain_id,
             'address'           => $address,
@@ -157,7 +123,7 @@ class SCP_BEP20_Wallet {
 
         $derived = SCP_Secp256k1::private_to_address( $s['private_key'] );
         if ( $derived && strtolower( $derived ) !== strtolower( $s['address'] ) ) {
-            return self::fail( 'BEP-20 private key does not match the registered USDT wallet address. Current mode is ' . $s['mode'] . '. Set define( \'SCP_BEP20_MODE\', \'test\' ); in wp-config.php for fake USDT.' );
+            return self::fail( 'BEP-20 private key does not match the registered USDT wallet address.' );
         }
 
         $wei = self::to_token_units( $amount, $s['decimals'] );
@@ -304,22 +270,20 @@ class SCP_BEP20_Wallet {
             return self::fail( 'Transaction sender does not match the provided destination address.' );
         }
 
-        $on_chain_amount = self::from_token_units( $transfer['amount'], $s['decimals'] );
+        $on_chain_amount = (float) self::from_token_units( $transfer['amount'], $s['decimals'] );
         if ( $expected > 0 && $on_chain_amount + 0.00000001 < $expected ) {
             return self::fail( 'On-chain amount is less than the selected deposit amount.' );
         }
 
-        $credit = $expected > 0 ? $expected : $on_chain_amount;
-
         return array(
-            'success'     => true,
-            'txHash'      => $tx_hash,
-            'from'        => $transfer['from'],
-            'to'          => $s['address'],
-            'amount'     => $credit,
+            'success'       => true,
+            'txHash'        => $tx_hash,
+            'from'          => $transfer['from'],
+            'to'            => $s['address'],
+            'amount'        => $on_chain_amount,
             'onChainAmount' => $on_chain_amount,
-            'network'    => 'BEP-20',
-            'asset'      => 'USDT',
+            'network'       => 'BEP-20',
+            'asset'         => 'USDT',
         );
     }
 

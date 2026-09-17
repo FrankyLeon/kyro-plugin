@@ -927,18 +927,13 @@ function scp_rest_resolve_deposit_amount( $request ) {
 }
 
 function scp_rest_wallet_deposit( $request ) {
-    $player_id = $request->get_param( 'player_id' );
-    $user_id = 0;
-    $user = null;
-
-    if ( empty( $player_id ) && is_user_logged_in() ) {
-        $user = wp_get_current_user();
-        $user_id = $user->ID;
-        $player_id = $user->user_login;
-    } elseif ( is_user_logged_in() ) {
-        $user = wp_get_current_user();
-        $user_id = $user->ID;
+    if ( ! is_user_logged_in() ) {
+        return new WP_Error( 'scp_wallet_deposit_login', 'Login is required.', [ 'status' => 403 ] );
     }
+
+    $user      = wp_get_current_user();
+    $user_id   = $user->ID;
+    $player_id = $user->user_login;
 
     if ( empty( $player_id ) ) {
         return new WP_Error( 'scp_wallet_deposit_missing_player', 'Player ID is required.', [ 'status' => 403 ] );
@@ -962,6 +957,14 @@ function scp_rest_wallet_deposit( $request ) {
     }
 
     if ( $is_crypto ) {
+        if ( class_exists( 'SCP_BEP20_Wallet' ) && ! SCP_BEP20_Wallet::is_simulate() && $tx_hash === '' ) {
+            return new WP_Error(
+                'scp_wallet_deposit_missing_tx',
+                'A BNB Smart Chain transaction hash is required.',
+                [ 'status' => 400 ]
+            );
+        }
+
         $verified = SCP_BEP20_Wallet::verify_incoming_usdt( $tx_hash, $destination, $amount );
         if ( empty( $verified['success'] ) ) {
             return new WP_Error(

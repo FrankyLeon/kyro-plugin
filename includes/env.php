@@ -96,32 +96,17 @@ function scp_env( $key, $default = '' ) {
 }
 
 function scp_bep20_normalize_mode( $mode ) {
-    $mode = strtolower( trim( (string) $mode ) );
-    if ( in_array( $mode, array( 'test', 'testing', 'dev', 'sandbox', 'simulate', 'fake' ), true ) ) {
-        return 'test';
-    }
-    if ( $mode === 'testnet' ) {
-        return 'testnet';
-    }
     return 'live';
 }
 
 function scp_bep20_mode_from_config() {
-    if ( ! defined( 'SCP_BEP20_MODE' ) ) {
-        return '';
-    }
-    return scp_bep20_normalize_mode( SCP_BEP20_MODE );
+    return 'live';
 }
 
 function scp_bep20_mode_from_env() {
-    return scp_bep20_mode_from_config();
+    return 'live';
 }
 
 function scp_bep20_mode() {
-    $locked = scp_bep20_mode_from_config();
-    if ( $locked !== '' ) {
-        return $locked;
-    }
-
-    return 'test';
+    return 'live';
 }
