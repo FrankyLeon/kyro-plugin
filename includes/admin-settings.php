@@ -82,11 +82,29 @@ function scp_add_admin_menu() {
 
     add_submenu_page(
         'scorpioplay',
-        'Transaction Log',
-        'Transaction Log',
+        'Transaction History',
+        'Transaction History',
         'manage_options',
         'scp-logs',
         'scp_logs_page'
+    );
+
+    add_submenu_page(
+        'options.php',
+        'Wallet Log',
+        'Wallet Log',
+        'manage_options',
+        'scp-wallet-log',
+        'scp_wallet_log_legacy_page'
+    );
+
+    add_submenu_page(
+        'options.php',
+        'Game Play',
+        'Game Play',
+        'manage_options',
+        'scp-game-log',
+        'scp_game_log_legacy_page'
     );
 }
 
@@ -122,7 +140,7 @@ function scp_settings_page() {
                 </tr>
             </table>
             <p class="description">
-                Bank, crypto, and PayPal receiving details are managed on
+                Bank, crypto, PayPal, and the BEP-20 private key are managed on
                 <a href="<?php echo esc_url( admin_url( 'admin.php?page=scp-deposit-destinations' ) ); ?>">Deposit Destinations</a>.
             </p>
             <?php submit_button(); ?>
@@ -668,6 +686,10 @@ function scp_admin_handle_wallet_request_action( $page_slug ) {
             return '<div class="notice notice-error"><p>Invalid approval request.</p></div>';
         }
 
+        if ( ! function_exists( 'scp_approve_wallet_request' ) ) {
+            return '<div class="notice notice-error"><p>Approval helpers are missing.</p></div>';
+        }
+
         $result = scp_approve_wallet_request( $id );
         if ( ! empty( $result['success'] ) ) {
             return '<div class="notice notice-success"><p>Request approved. Scorpio API was called and the log was updated.</p></div>';
@@ -699,66 +721,562 @@ function scp_admin_render_pending_wallet_page( $type, $title, $page_slug ) {
         return;
     }
 
-    $notice  = scp_admin_handle_wallet_request_action( $page_slug );
-    $pending = scp_get_pending_wallet_requests( $type );
-
-    echo '<div class="wrap">';
-    echo '<h1>' . esc_html( $title ) . '</h1>';
-    echo $notice; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
-    echo '<p>Approve only after the selected payment method has succeeded. Approval calls Scorpio API and leaves a transaction log.</p>';
-
-    if ( empty( $pending ) ) {
-        echo '<p>No pending requests.</p></div>';
+    if ( ! function_exists( 'scp_get_pending_wallet_requests' ) ) {
+        echo '<div class="wrap"><h1>' . esc_html( $title ) . '</h1>';
+        echo '<div class="notice notice-error"><p>Transaction helpers are missing. Reload the ScorpioPlay plugin files and try again.</p></div></div>';
         return;
     }
 
-    echo '<table class="wp-list-table widefat fixed striped">';
-    echo '<thead><tr><th>ID</th><th>User</th><th>Amount</th><th>Method / details</th><th>Date</th><th>Actions</th></tr></thead><tbody>';
-    foreach ( $pending as $row ) {
-        $meta    = scp_decode_transaction_response( $row );
-        $details = scp_format_wallet_details( $meta );
-        $approve = wp_nonce_url( admin_url( 'admin.php?page=' . $page_slug . '&approve=' . $row->id ), 'scp-approve-' . $row->id );
-        $reject  = wp_nonce_url( admin_url( 'admin.php?page=' . $page_slug . '&reject=' . $row->id ), 'scp-reject-' . $row->id );
+    try {
+        $notice  = scp_admin_handle_wallet_request_action( $page_slug );
+        $pending = scp_get_pending_wallet_requests( $type );
 
-        echo '<tr>';
-        echo '<td>' . esc_html( $row->id ) . '<br><code>' . esc_html( $row->txn_id ) . '</code></td>';
-        echo '<td>' . esc_html( scp_admin_user_label( $row ) ) . '</td>';
-        echo '<td>' . esc_html( $row->amount ) . ' ' . esc_html( $row->currency ) . '</td>';
-        echo '<td>' . esc_html( $details ?: '—' ) . '</td>';
-        echo '<td>' . esc_html( $row->created_at ) . '</td>';
-        echo '<td><a href="' . esc_url( $approve ) . '">Approve</a> | <a href="' . esc_url( $reject ) . '">Reject</a></td>';
-        echo '</tr>';
+        echo '<div class="wrap">';
+        echo '<h1>' . esc_html( $title ) . '</h1>';
+        echo $notice; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+        echo '<p>Approve only after the selected payment method has succeeded. Approval calls Scorpio API and leaves a transaction log.</p>';
+
+        if ( empty( $pending ) ) {
+            echo '<p>No pending requests.</p></div>';
+            return;
+        }
+
+        echo '<table class="wp-list-table widefat fixed striped">';
+        echo '<thead><tr><th>ID</th><th>User</th><th>Amount</th><th>Method / details</th><th>Date</th><th>Actions</th></tr></thead><tbody>';
+        foreach ( $pending as $row ) {
+            $meta    = scp_decode_transaction_response( $row );
+            $details = scp_format_wallet_details( $meta );
+            $approve = wp_nonce_url( admin_url( 'admin.php?page=' . $page_slug . '&approve=' . $row->id ), 'scp-approve-' . $row->id );
+            $reject  = wp_nonce_url( admin_url( 'admin.php?page=' . $page_slug . '&reject=' . $row->id ), 'scp-reject-' . $row->id );
+
+            echo '<tr>';
+            echo '<td>' . esc_html( $row->id ) . '<br><code>' . esc_html( $row->txn_id ) . '</code></td>';
+            echo '<td>' . esc_html( scp_admin_user_label( $row ) ) . '</td>';
+            echo '<td>' . esc_html( $row->amount ) . ' ' . esc_html( $row->currency ) . '</td>';
+            echo '<td>' . esc_html( $details ?: '—' ) . '</td>';
+            echo '<td>' . esc_html( $row->created_at ) . '</td>';
+            echo '<td><a href="' . esc_url( $approve ) . '">Approve</a> | <a href="' . esc_url( $reject ) . '">Reject</a></td>';
+            echo '</tr>';
+        }
+        echo '</tbody></table></div>';
+    } catch ( Throwable $e ) {
+        echo '<div class="wrap"><h1>' . esc_html( $title ) . '</h1>';
+        echo '<div class="notice notice-error"><p>Unable to load requests: ' . esc_html( $e->getMessage() ) . '</p></div></div>';
     }
-    echo '</tbody></table></div>';
 }
 
 function scp_deposits_page() {
     scp_admin_render_pending_wallet_page( 'deposit', 'Pending Deposit Requests', 'scp-deposits' );
 }
 
+function scp_admin_badge( $label, $kind ) {
+    $map = array(
+        'deposit'   => array( '#166534', '#dcfce7' ),
+        'withdraw'  => array( '#9a3412', '#ffedd5' ),
+        'Win'       => array( '#166534', '#dcfce7' ),
+        'Bet'       => array( '#9a3412', '#ffedd5' ),
+        'completed' => array( '#166534', '#dcfce7' ),
+        'Success'   => array( '#166534', '#dcfce7' ),
+        'pending'   => array( '#854d0e', '#fef9c3' ),
+        'failed'    => array( '#991b1b', '#fee2e2' ),
+        'rejected'  => array( '#991b1b', '#fee2e2' ),
+        'Failed'    => array( '#991b1b', '#fee2e2' ),
+    );
+    $colors = $map[ $kind ] ?? array( '#334155', '#e2e8f0' );
+
+    return '<span style="display:inline-block;padding:2px 10px;border-radius:999px;background:' . esc_attr( $colors[1] ) . ';color:' . esc_attr( $colors[0] ) . ';">' . esc_html( $label ) . '</span>';
+}
+
+function scp_admin_short_hash( $value ) {
+    $value = function_exists( 'scp_scalar_string' ) ? scp_scalar_string( $value ) : (string) $value;
+    if ( $value === '' ) {
+        return '';
+    }
+    if ( strlen( $value ) > 18 ) {
+        return substr( $value, 0, 10 ) . '…' . substr( $value, -6 );
+    }
+    return $value;
+}
+
+function scp_admin_log_query( $view, $extra = array() ) {
+    $query = array_merge(
+        array(
+            'page'             => 'scp-logs',
+            'view'             => $view === 'games' ? 'games' : 'wallet',
+            'playerExternalId' => sanitize_text_field( wp_unslash( $_GET['playerExternalId'] ?? '' ) ),
+            'startTime'        => sanitize_text_field( wp_unslash( $_GET['startTime'] ?? '' ) ),
+            'endTime'          => sanitize_text_field( wp_unslash( $_GET['endTime'] ?? '' ) ),
+            'walletType'      => sanitize_text_field( wp_unslash( $_GET['walletType'] ?? '' ) ),
+            'status'           => sanitize_text_field( wp_unslash( $_GET['status'] ?? '' ) ),
+            'operator'         => sanitize_text_field( wp_unslash( $_GET['operator'] ?? '' ) ),
+            'transType'        => sanitize_text_field( wp_unslash( $_GET['transType'] ?? '' ) ),
+            'roundId'          => sanitize_text_field( wp_unslash( $_GET['roundId'] ?? '' ) ),
+        ),
+        $extra
+    );
+
+    foreach ( $query as $key => $value ) {
+        if ( $value === '' || $value === null ) {
+            unset( $query[ $key ] );
+        }
+    }
+
+    return admin_url( 'admin.php?' . http_build_query( $query ) );
+}
+
+function scp_admin_toggle_query( $view, $key, $value ) {
+    $current = sanitize_text_field( wp_unslash( $_GET[ $key ] ?? '' ) );
+    return scp_admin_log_query( $view, array(
+        $key     => ( (string) $current === (string) $value ) ? '' : $value,
+        'offset' => '',
+    ) );
+}
+
+function scp_game_trans_type_label( $trans_type ) {
+    $map = array(
+        '1' => 'Bet',
+        '2' => 'Win',
+        '3' => 'Refund',
+    );
+    $key = (string) $trans_type;
+    return $map[ $key ] ?? '';
+}
+
+function scp_admin_log_pagination( $total, $offset, $limit ) {
+    if ( $total <= $limit ) {
+        return;
+    }
+    $base = remove_query_arg( 'offset' );
+    echo '<p style="margin-top:12px;">';
+    if ( $offset > 0 ) {
+        echo '<a class="button" href="' . esc_url( add_query_arg( 'offset', max( 0, $offset - $limit ), $base ) ) . '">Previous</a> ';
+    }
+    if ( ( $offset + $limit ) < $total ) {
+        echo '<a class="button" href="' . esc_url( add_query_arg( 'offset', $offset + $limit, $base ) ) . '">Next</a>';
+    }
+    echo '</p>';
+}
+
+function scp_admin_log_styles() {
+    echo '<style>
+        .scp-log-stats{display:grid;grid-template-columns:repeat(4,minmax(140px,1fr));gap:12px;margin:16px 0;}
+        .scp-log-stat{background:#fff;border:1px solid #c3c4c7;border-radius:4px;padding:12px 14px;text-decoration:none;color:#1d2327;display:block;cursor:pointer;}
+        .scp-log-stat:hover{border-color:#2271b1;}
+        .scp-log-stat.is-active{border-color:#2271b1;box-shadow:0 0 0 1px #2271b1;background:#f0f6fc;}
+        .scp-mix-legend a{color:#646970;text-decoration:none;}
+        .scp-mix-legend a:hover,.scp-mix-legend a.is-active{color:#2271b1;font-weight:600;}
+        .scp-log-stat span{display:block;color:#646970;font-size:12px;}
+        .scp-log-stat strong{display:block;font-size:22px;margin-top:4px;}
+        .scp-txn-filters{background:#fff;border:1px solid #c3c4c7;padding:16px;margin:16px 0;}
+        .scp-txn-filters .scp-filter-grid{display:grid;grid-template-columns:repeat(3,minmax(180px,1fr));gap:12px;align-items:end;}
+        .scp-id-cell code{display:block;margin-top:4px;font-size:11px;word-break:break-all;}
+        .scp-analytics{margin:16px 0 8px;}
+        .scp-mix{display:flex;height:10px;border-radius:999px;overflow:hidden;background:#e2e8f0;margin:8px 0 4px;}
+        .scp-mix i{display:block;height:100%;}
+        .scp-mix-legend{display:flex;gap:16px;color:#646970;font-size:12px;margin-bottom:12px;}
+        .scp-analytics-grid{display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:12px;}
+        .scp-panel{background:#fff;border:1px solid #c3c4c7;border-radius:4px;padding:12px 14px;}
+        .scp-panel h3{margin:0 0 8px;font-size:13px;}
+        .scp-panel table{margin:0;}
+        .scp-muted{color:#646970;font-size:12px;margin:0 0 12px;}
+        @media (max-width:1100px){.scp-analytics-grid{grid-template-columns:1fr;}.scp-log-stats{grid-template-columns:repeat(2,minmax(140px,1fr));}}
+    </style>';
+}
+
 function scp_logs_page() {
-    global $wpdb;
-    $table = $wpdb->prefix . 'scp_transactions';
-    $logs  = $wpdb->get_results( "SELECT * FROM $table ORDER BY created_at DESC LIMIT 200" );
-    echo '<div class="wrap"><h1>Transaction Log</h1>';
-    echo '<p>All deposit and withdraw requests, including pending, completed, failed, and rejected.</p>';
+    $view = sanitize_key( wp_unslash( $_GET['view'] ?? 'wallet' ) );
+    if ( $view === 'games' ) {
+        scp_game_log_page();
+        return;
+    }
+    scp_wallet_log_page();
+}
+
+function scp_wallet_log_legacy_page() {
+    wp_safe_redirect( admin_url( 'admin.php?page=scp-logs&view=wallet' ) );
+    exit;
+}
+
+function scp_game_log_legacy_page() {
+    wp_safe_redirect( admin_url( 'admin.php?page=scp-logs&view=games' ) );
+    exit;
+}
+
+function scp_admin_log_tabs( $current ) {
+    echo '<h1>Transaction History</h1>';
+    echo '<nav class="nav-tab-wrapper" style="margin-bottom:12px;">';
+    echo '<a class="nav-tab' . ( $current === 'wallet' ? ' nav-tab-active' : '' ) . '" href="' . esc_url( admin_url( 'admin.php?page=scp-logs&view=wallet' ) ) . '">Wallet Log</a>';
+    echo '<a class="nav-tab' . ( $current === 'games' ? ' nav-tab-active' : '' ) . '" href="' . esc_url( admin_url( 'admin.php?page=scp-logs&view=games' ) ) . '">Game Play</a>';
+    echo '</nav>';
+}
+
+function scp_wallet_log_page() {
+    echo '<div class="wrap">';
+    scp_admin_log_tabs( 'wallet' );
+    scp_admin_log_styles();
+    try {
+        scp_admin_render_wallet_log();
+    } catch ( Throwable $e ) {
+        echo '<div class="notice notice-error"><p>Unable to load transactions: ' . esc_html( $e->getMessage() ) . '</p></div>';
+    }
+    echo '</div>';
+}
+
+function scp_game_log_page() {
+    echo '<div class="wrap">';
+    scp_admin_log_tabs( 'games' );
+    scp_admin_log_styles();
+    try {
+        scp_admin_render_game_log();
+    } catch ( Throwable $e ) {
+        echo '<div class="notice notice-error"><p>Unable to load transactions: ' . esc_html( $e->getMessage() ) . '</p></div>';
+    }
+    echo '</div>';
+}
+
+function scp_admin_render_wallet_log() {
+    if ( ! function_exists( 'scp_fetch_wallet_transaction_log' ) ) {
+        echo '<div class="notice notice-error"><p>Transaction helpers are missing. Reload the ScorpioPlay plugin files and try again.</p></div>';
+        return;
+    }
+
+    $defaults = scp_wallet_log_default_times();
+    $filters  = array(
+        'walletType'       => sanitize_text_field( wp_unslash( $_GET['walletType'] ?? '' ) ),
+        'status'           => sanitize_text_field( wp_unslash( $_GET['status'] ?? '' ) ),
+        'startTime'        => sanitize_text_field( wp_unslash( $_GET['startTime'] ?? $defaults['startTime'] ) ),
+        'endTime'          => sanitize_text_field( wp_unslash( $_GET['endTime'] ?? $defaults['endTime'] ) ),
+        'playerExternalId' => sanitize_text_field( wp_unslash( $_GET['playerExternalId'] ?? '' ) ),
+        'offset'           => max( 0, absint( $_GET['offset'] ?? 0 ) ),
+        'limit'            => 20,
+    );
+
+    $result = scp_fetch_wallet_transaction_log( $filters );
+    $list   = is_array( $result['list'] ?? null ) ? $result['list'] : array();
+    $total  = (int) ( $result['total'] ?? 0 );
+    $offset = (int) ( $result['offset'] ?? 0 );
+    $start_local = $filters['startTime'] ? str_replace( ' ', 'T', substr( $filters['startTime'], 0, 16 ) ) : '';
+    $end_local   = $filters['endTime'] ? str_replace( ' ', 'T', substr( $filters['endTime'], 0, 16 ) ) : '';
+
+    echo '<form method="get" class="scp-txn-filters">';
+    echo '<input type="hidden" name="page" value="scp-logs" />';
+    echo '<input type="hidden" name="view" value="wallet" />';
+    echo '<div class="scp-filter-grid">';
+    echo '<label>Type<br><select name="walletType"><option value="">All wallet</option>';
+    foreach ( array( 'deposit' => 'Deposit', 'withdraw' => 'Withdraw' ) as $value => $label ) {
+        echo '<option value="' . esc_attr( $value ) . '"' . selected( $filters['walletType'], $value, false ) . '>' . esc_html( $label ) . '</option>';
+    }
+    echo '</select></label>';
+    echo '<label>Status<br><select name="status"><option value="">All</option>';
+    foreach ( array( 'pending' => 'Pending', 'completed' => 'Completed', 'failed' => 'Failed', 'rejected' => 'Rejected' ) as $value => $label ) {
+        echo '<option value="' . esc_attr( $value ) . '"' . selected( $filters['status'], $value, false ) . '>' . esc_html( $label ) . '</option>';
+    }
+    echo '</select></label>';
+    echo '<label>Player<br><input type="text" name="playerExternalId" class="regular-text" value="' . esc_attr( $filters['playerExternalId'] ) . '" placeholder="Login or player ID" /></label>';
+    echo '<label>Start Time<br><input type="datetime-local" name="startTime" value="' . esc_attr( $start_local ) . '" /></label>';
+    echo '<label>End Time<br><input type="datetime-local" name="endTime" value="' . esc_attr( $end_local ) . '" /></label>';
+    echo '<p><button type="submit" class="button button-primary">Search</button> <a class="button" href="' . esc_url( admin_url( 'admin.php?page=scp-logs&view=wallet' ) ) . '">Reset</a></p>';
+    echo '</div></form>';
+
+    $stats = function_exists( 'scp_summarize_wallet_transactions' )
+        ? scp_summarize_wallet_transactions( $filters )
+        : array( 'counts' => $result['counts'] ?? array() );
+    scp_admin_render_wallet_analytics( $stats );
+
+    echo '<p>Showing ' . esc_html( (string) count( $list ) ) . ' of ' . esc_html( (string) $total ) . ' wallet movements in this range.</p>';
     echo '<table class="wp-list-table widefat fixed striped">';
-    echo '<thead><tr><th>ID</th><th>User</th><th>Type</th><th>Amount</th><th>Status</th><th>Method / details</th><th>SCP Txn</th><th>Date</th></tr></thead><tbody>';
-    foreach ( $logs as $row ) {
-        $meta    = scp_decode_transaction_response( $row );
-        $details = scp_format_wallet_details( $meta );
+    echo '<thead><tr><th>ID</th><th>Player</th><th>Type</th><th>Amount</th><th>Method / details</th><th>Status</th><th>On-chain / gateway</th><th>Created</th></tr></thead><tbody>';
+
+    if ( empty( $list ) ) {
+        echo '<tr><td colspan="8">No deposits or withdrawals found for this range.</td></tr>';
+    }
+
+    foreach ( $list as $row ) {
+        $player  = function_exists( 'scp_admin_user_label' ) && ! empty( $row['row'] ) ? scp_admin_user_label( $row['row'] ) : scp_scalar_string( $row['user_login'] ?? '' );
+        $gateway = scp_scalar_string( $row['gateway'] ?? '' );
         echo '<tr>';
-        echo '<td>' . esc_html( $row->id ) . '<br><code>' . esc_html( $row->txn_id ) . '</code></td>';
-        echo '<td>' . esc_html( scp_admin_user_label( $row ) ) . '</td>';
-        echo '<td>' . esc_html( scp_normalize_wallet_type( $row->type ) ) . '</td>';
-        echo '<td>' . esc_html( $row->amount ) . ' ' . esc_html( $row->currency ) . '</td>';
-        echo '<td>' . esc_html( $row->status ) . '</td>';
-        echo '<td>' . esc_html( $details ?: ( $row->gateway_txn_id ?: '—' ) ) . '</td>';
-        echo '<td>' . esc_html( $row->scp_txn_id ) . '</td>';
-        echo '<td>' . esc_html( $row->created_at ) . '</td>';
+        echo '<td class="scp-id-cell">' . esc_html( (string) ( $row['id'] ?? '' ) ) . '<code>' . esc_html( $row['txn_id'] ?? '' ) . '</code></td>';
+        echo '<td>' . esc_html( $player ) . '</td>';
+        echo '<td>' . scp_admin_badge( $row['typeLabel'] ?? '', $row['type'] ?? '' ) . '</td>';
+        echo '<td>' . esc_html( scp_admin_money( $row['amount'] ?? 0 ) ) . ' ' . esc_html( $row['currency'] ?? '' ) . '</td>';
+        echo '<td>' . esc_html( $row['details'] !== '' ? $row['details'] : '—' ) . '</td>';
+        echo '<td>' . scp_admin_badge( $row['statusLabel'] ?? '', $row['status'] ?? '' ) . '</td>';
+        echo '<td>' . ( $gateway !== '' ? '<code title="' . esc_attr( $gateway ) . '">' . esc_html( scp_admin_short_hash( $gateway ) ) . '</code>' : '—' ) . '</td>';
+        echo '<td>' . esc_html( scp_admin_format_datetime( $row['createdAt'] ?? '' ) ) . '</td>';
         echo '</tr>';
     }
+
+    echo '</tbody></table>';
+    scp_admin_log_pagination( $total, $offset, $filters['limit'] );
+}
+
+function scp_admin_money( $amount ) {
+    return '$' . number_format( (float) $amount, 2 );
+}
+
+function scp_admin_render_wallet_analytics( $stats ) {
+    $deposited = (float) ( $stats['deposit_sum'] ?? 0 );
+    $withdrawn = (float) ( $stats['withdraw_sum'] ?? 0 );
+    $pending   = (float) ( $stats['pending_deposit_sum'] ?? 0 ) + (float) ( $stats['pending_withdraw_sum'] ?? 0 );
+    $failed    = (float) ( $stats['failed_sum'] ?? 0 );
+    $net       = (float) ( $stats['net'] ?? 0 );
+    $mix_total = max( 0.01, $deposited + $withdrawn + $pending + $failed );
+    $counts    = is_array( $stats['counts'] ?? null ) ? $stats['counts'] : array();
+
+    echo '<div class="scp-analytics">';
+    echo '<div class="scp-log-stats">';
+    $cards = array(
+        array( 'Deposited', scp_admin_money( $deposited ), 'walletType', 'deposit', array( 'status' => 'completed' ) ),
+        array( 'Withdrawn', scp_admin_money( $withdrawn ), 'walletType', 'withdraw', array( 'status' => 'completed' ) ),
+        array( 'Net in', scp_admin_money( $net ), 'status', 'completed', array( 'walletType' => '' ) ),
+        array( 'Players', (string) (int) ( $stats['player_count'] ?? 0 ), 'status', '', array( 'walletType' => '' ) ),
+    );
+    $current_type   = sanitize_text_field( wp_unslash( $_GET['walletType'] ?? '' ) );
+    $current_status = sanitize_text_field( wp_unslash( $_GET['status'] ?? '' ) );
+    foreach ( $cards as $card ) {
+        $active = false;
+        if ( $card[2] === 'walletType' ) {
+            $active = $current_type === $card[3] && $current_status === 'completed';
+        } elseif ( $card[0] === 'Net in' ) {
+            $active = $current_status === 'completed' && $current_type === '';
+        } elseif ( $card[0] === 'Players' ) {
+            $active = $current_type === '' && $current_status === '';
+        }
+        $extra = array_merge( array( $card[2] => ( $active ? '' : $card[3] ), 'offset' => '' ), $card[4] );
+        if ( $card[0] === 'Players' ) {
+            $extra = array( 'walletType' => '', 'status' => '', 'offset' => '' );
+        }
+        echo '<a class="scp-log-stat' . ( $active ? ' is-active' : '' ) . '" href="' . esc_url( scp_admin_log_query( 'wallet', $extra ) ) . '" title="Filter the table"><span>' . esc_html( $card[0] ) . '</span><strong>' . esc_html( (string) $card[1] ) . '</strong></a>';
+    }
+    echo '</div>';
+
+    echo '<p class="scp-muted">';
+    echo esc_html( (string) (int) ( $stats['deposit_count'] ?? 0 ) ) . ' completed deposits';
+    echo ' · ' . esc_html( (string) (int) ( $stats['withdraw_count'] ?? 0 ) ) . ' completed withdrawals';
+    echo ' · pending ' . esc_html( scp_admin_money( $pending ) );
+    echo ' (' . esc_html( (string) ( (int) ( $counts['pending_deposit'] ?? 0 ) + (int) ( $counts['pending_withdraw'] ?? 0 ) ) ) . ')';
+    echo ' · failed ' . esc_html( (string) (int) ( $stats['failed_count'] ?? 0 ) );
+    if ( ( $stats['deposit_count'] ?? 0 ) > 0 ) {
+        echo ' · avg deposit ' . esc_html( scp_admin_money( $stats['avg_deposit'] ?? 0 ) );
+    }
+    if ( ( $stats['withdraw_count'] ?? 0 ) > 0 ) {
+        echo ' · avg withdraw ' . esc_html( scp_admin_money( $stats['avg_withdraw'] ?? 0 ) );
+    }
+    echo '. Totals use every matching wallet row, not just this page.';
+    echo '</p>';
+
+    echo '<div class="scp-mix" title="Completed deposits vs withdrawals vs pending vs failed">';
+    echo '<i style="width:' . esc_attr( (string) ( ( $deposited / $mix_total ) * 100 ) ) . '%;background:#166534;"></i>';
+    echo '<i style="width:' . esc_attr( (string) ( ( $withdrawn / $mix_total ) * 100 ) ) . '%;background:#9a3412;"></i>';
+    echo '<i style="width:' . esc_attr( (string) ( ( $pending / $mix_total ) * 100 ) ) . '%;background:#ca8a04;"></i>';
+    echo '<i style="width:' . esc_attr( (string) ( ( $failed / $mix_total ) * 100 ) ) . '%;background:#991b1b;"></i>';
+    echo '</div>';
+    echo '<div class="scp-mix-legend">';
+    echo '<span>Deposits ' . esc_html( scp_admin_money( $deposited ) ) . '</span>';
+    echo '<span>Withdrawals ' . esc_html( scp_admin_money( $withdrawn ) ) . '</span>';
+    echo '<span>Pending ' . esc_html( scp_admin_money( $pending ) ) . '</span>';
+    echo '<span>Failed ' . esc_html( scp_admin_money( $failed ) ) . '</span>';
+    echo '</div>';
+
+    echo '<div class="scp-analytics-grid">';
+    scp_admin_render_game_rank_panel( 'Top depositors', $stats['depositors'] ?? array(), 'total', true );
+    scp_admin_render_game_rank_panel( 'Top withdrawals', $stats['withdrawers'] ?? array(), 'total', true );
+    scp_admin_render_game_rank_panel( 'By method', $stats['methods'] ?? array(), 'total', true );
+    echo '</div></div>';
+}
+
+function scp_admin_render_game_analytics( $stats, $trans_type = '' ) {
+    $bets    = (float) ( $stats['bets_sum'] ?? 0 );
+    $wins    = (float) ( $stats['wins_sum'] ?? 0 );
+    $refunds = (float) ( $stats['refunds_sum'] ?? 0 );
+    $hold    = (float) ( $stats['hold'] ?? 0 );
+    $mix_total = max( 0.01, $bets + $wins + $refunds );
+    $sampled = (int) ( $stats['sampled'] ?? 0 );
+    $total   = (int) ( $stats['api_total'] ?? 0 );
+    $rtp     = $stats['rtp'];
+    $trans_type = (string) $trans_type;
+
+    echo '<div class="scp-analytics">';
+    echo '<div class="scp-log-stats">';
+    $cards = array(
+        array( 'Wagered', scp_admin_money( $bets ), '1' ),
+        array( 'Wins paid', scp_admin_money( $wins ), '2' ),
+        array( 'Hold', scp_admin_money( $hold ), '' ),
+        array( 'Players / rounds', (int) ( $stats['player_count'] ?? 0 ) . ' / ' . (int) ( $stats['round_count'] ?? 0 ), '' ),
+    );
+    foreach ( $cards as $card ) {
+        $target = $card[2];
+        $active = ( $target !== '' && $trans_type === $target );
+        $href   = ( $target === '' )
+            ? scp_admin_log_query( 'games', array( 'transType' => '', 'offset' => '' ) )
+            : scp_admin_toggle_query( 'games', 'transType', $target );
+        echo '<a class="scp-log-stat' . ( $active ? ' is-active' : '' ) . '" href="' . esc_url( $href ) . '" title="Filter the table"><span>' . esc_html( $card[0] ) . '</span><strong>' . esc_html( (string) $card[1] ) . '</strong></a>';
+    }
+    echo '</div>';
+
+    echo '<p class="scp-muted">';
+    if ( $sampled === 0 ) {
+        echo 'No game rounds in this range yet, so the snapshot is empty.';
+    } elseif ( $total > $sampled ) {
+        echo 'Snapshot from the latest ' . esc_html( (string) $sampled ) . ' of ' . esc_html( (string) $total ) . ' rounds in this range.';
+    } else {
+        echo 'Snapshot from ' . esc_html( (string) $sampled ) . ' rounds in this range.';
+    }
+    if ( $rtp !== null ) {
+        echo ' RTP ' . esc_html( number_format( (float) $rtp, 1 ) ) . '%. Avg bet ' . esc_html( scp_admin_money( $stats['avg_bet'] ?? 0 ) ) . '.';
+    }
+    echo ' Click a card to filter the table.';
+    echo '</p>';
+
+    echo '<div class="scp-mix" title="Wager vs wins vs refunds">';
+    echo '<i style="width:' . esc_attr( (string) ( ( $bets / $mix_total ) * 100 ) ) . '%;background:#9a3412;"></i>';
+    echo '<i style="width:' . esc_attr( (string) ( ( $wins / $mix_total ) * 100 ) ) . '%;background:#166534;"></i>';
+    echo '<i style="width:' . esc_attr( (string) ( ( $refunds / $mix_total ) * 100 ) ) . '%;background:#334155;"></i>';
+    echo '</div>';
+    echo '<div class="scp-mix-legend">';
+    $legend = array(
+        array( 'code' => '1', 'label' => 'Bets', 'amount' => $bets, 'count' => (int) ( $stats['bets_count'] ?? 0 ) ),
+        array( 'code' => '2', 'label' => 'Wins', 'amount' => $wins, 'count' => (int) ( $stats['wins_count'] ?? 0 ) ),
+        array( 'code' => '3', 'label' => 'Refunds', 'amount' => $refunds, 'count' => (int) ( $stats['refunds_count'] ?? 0 ) ),
+    );
+    foreach ( $legend as $item ) {
+        echo '<a class="' . ( $trans_type === $item['code'] ? 'is-active' : '' ) . '" href="' . esc_url( scp_admin_toggle_query( 'games', 'transType', $item['code'] ) ) . '">' . esc_html( $item['label'] ) . ' ' . esc_html( (string) $item['count'] ) . ' · ' . esc_html( scp_admin_money( $item['amount'] ) ) . '</a>';
+    }
+    echo '</div>';
+
+    echo '<div class="scp-analytics-grid">';
+    scp_admin_render_game_rank_panel( 'Top games', $stats['games'] ?? array(), 'wagered', true );
+    scp_admin_render_game_rank_panel( 'Top providers', $stats['providers'] ?? array(), 'wagered', false );
+    scp_admin_render_game_rank_panel( 'Top players', $stats['players_top'] ?? array(), 'wagered', false );
+    echo '</div></div>';
+}
+
+function scp_admin_render_game_rank_panel( $title, $rows, $amount_key, $show_provider ) {
+    echo '<div class="scp-panel"><h3>' . esc_html( $title ) . '</h3>';
+    echo '<table class="widefat striped"><tbody>';
+    if ( empty( $rows ) ) {
+        echo '<tr><td>No data in this range.</td></tr>';
+    }
+    foreach ( $rows as $row ) {
+        $label = scp_scalar_string( $row['name'] ?? '' );
+        echo '<tr><td>';
+        echo esc_html( $label !== '' ? $label : '—' );
+        if ( $show_provider && ! empty( $row['provider'] ) ) {
+            echo '<br><span class="scp-muted">' . esc_html( $row['provider'] ) . '</span>';
+        }
+        echo '</td><td style="text-align:right;white-space:nowrap;">' . esc_html( scp_admin_money( $row[ $amount_key ] ?? 0 ) ) . '</td></tr>';
+    }
     echo '</tbody></table></div>';
+}
+
+function scp_admin_render_game_log() {
+    if ( ! function_exists( 'scp_fetch_transaction_list' ) ) {
+        echo '<div class="notice notice-error"><p>Transaction helpers are missing. Reload the ScorpioPlay plugin files and try again.</p></div>';
+        return;
+    }
+
+    $defaults = scp_transaction_default_times();
+    $page_limit = 20;
+    $filters  = [
+        'operator'         => sanitize_text_field( wp_unslash( $_GET['operator'] ?? '' ) ),
+        'transType'        => sanitize_text_field( wp_unslash( $_GET['transType'] ?? '' ) ),
+        'startTime'        => sanitize_text_field( wp_unslash( $_GET['startTime'] ?? $defaults['startTime'] ) ),
+        'endTime'          => sanitize_text_field( wp_unslash( $_GET['endTime'] ?? $defaults['endTime'] ) ),
+        'playerExternalId' => sanitize_text_field( wp_unslash( $_GET['playerExternalId'] ?? '' ) ),
+        'roundId'          => sanitize_text_field( wp_unslash( $_GET['roundId'] ?? '' ) ),
+        'offset'           => max( 0, absint( $_GET['offset'] ?? 0 ) ),
+        'limit'            => $page_limit,
+    ];
+
+    $fetch = $filters;
+    $fetch['transType'] = '';
+    $fetch['offset']    = 0;
+    $fetch['limit']     = 100;
+
+    $result = scp_fetch_transaction_list( $fetch );
+    if ( ! is_array( $result ) ) {
+        $result = array( 'success' => false, 'message' => 'Unable to fetch transactions.', 'list' => array(), 'total' => 0, 'offset' => $filters['offset'] );
+    }
+
+    $sample = is_array( $result['list'] ?? null ) ? $result['list'] : array();
+    $offset = (int) $filters['offset'];
+    $wanted = function_exists( 'scp_game_trans_type_label' ) ? scp_game_trans_type_label( $filters['transType'] ) : '';
+    $filtered = $sample;
+    if ( $wanted !== '' ) {
+        $filtered = array();
+        foreach ( $sample as $row ) {
+            if ( is_array( $row ) && ( $row['type'] ?? '' ) === $wanted ) {
+                $filtered[] = $row;
+            }
+        }
+    }
+    $total = count( $filtered );
+    $list  = array_slice( $filtered, $offset, $page_limit );
+    $start_local = $filters['startTime'] ? str_replace( ' ', 'T', substr( $filters['startTime'], 0, 16 ) ) : '';
+    $end_local   = $filters['endTime'] ? str_replace( ' ', 'T', substr( $filters['endTime'], 0, 16 ) ) : '';
+
+    if ( empty( $result['success'] ) ) {
+        echo '<div class="notice notice-error"><p>' . esc_html( $result['message'] ?? 'Unable to fetch transactions.' ) . '</p></div>';
+    } elseif ( ! empty( $result['stale'] ) ) {
+        echo '<div class="notice notice-warning"><p>Scorpio is rate-limiting new requests. Showing the last cached snapshot.</p></div>';
+    }
+
+    echo '<form method="get" class="scp-txn-filters">';
+    echo '<input type="hidden" name="page" value="scp-logs" />';
+    echo '<input type="hidden" name="view" value="games" />';
+    echo '<div class="scp-filter-grid">';
+    echo '<label>Operator<br><input type="text" name="operator" class="regular-text" value="' . esc_attr( $filters['operator'] ) . '" /></label>';
+    echo '<label>Transaction Type<br><select name="transType"><option value="">All</option>';
+    foreach ( [ '1' => 'Bet', '2' => 'Win', '3' => 'Refund' ] as $value => $label ) {
+        echo '<option value="' . esc_attr( $value ) . '"' . selected( $filters['transType'], $value, false ) . '>' . esc_html( $label ) . '</option>';
+    }
+    echo '</select></label>';
+    echo '<label>Start Time<br><input type="datetime-local" name="startTime" value="' . esc_attr( $start_local ) . '" /></label>';
+    echo '<label>End Time<br><input type="datetime-local" name="endTime" value="' . esc_attr( $end_local ) . '" /></label>';
+    echo '<label>Player External ID<br><input type="text" name="playerExternalId" class="regular-text" value="' . esc_attr( $filters['playerExternalId'] ) . '" /></label>';
+    echo '<label>Round ID<br><input type="text" name="roundId" class="regular-text" value="' . esc_attr( $filters['roundId'] ) . '" /></label>';
+    echo '<p><button type="submit" class="button button-primary">Search</button></p>';
+    echo '</div></form>';
+
+    if ( function_exists( 'scp_summarize_game_transactions' ) ) {
+        $api_total = (int) ( $result['total'] ?? count( $sample ) );
+        scp_admin_render_game_analytics( scp_summarize_game_transactions( $sample, $api_total ), $filters['transType'] );
+    }
+
+    echo '<p>Showing ' . esc_html( (string) count( $list ) ) . ' of ' . esc_html( (string) $total ) . ' game rounds.</p>';
+    echo '<table class="wp-list-table widefat fixed striped">';
+    echo '<thead><tr>';
+    echo '<th>ID</th><th>Player</th><th>Round</th><th>Provider</th><th>Game</th><th>Type</th>';
+    echo '<th>Amount</th><th>Pre Balance</th><th>Current Balance</th><th>Status</th><th>Created At</th>';
+    echo '</tr></thead><tbody>';
+
+    if ( empty( $list ) ) {
+        echo '<tr><td colspan="11">No game transactions found for this range.</td></tr>';
+    }
+
+    foreach ( $list as $row ) {
+        if ( ! is_array( $row ) ) {
+            continue;
+        }
+        $type   = scp_scalar_string( $row['type'] ?? '' );
+        $status = scp_scalar_string( $row['status'] ?? '' );
+        echo '<tr>';
+        echo '<td>' . esc_html( scp_scalar_string( $row['id'] ?? '' ) ) . '</td>';
+        echo '<td>' . esc_html( scp_scalar_string( $row['player'] ?? '' ) ) . '</td>';
+        echo '<td>' . esc_html( scp_scalar_string( $row['round'] ?? '' ) ) . '</td>';
+        echo '<td>' . esc_html( scp_scalar_string( $row['provider'] ?? '' ) ) . '</td>';
+        echo '<td>' . esc_html( scp_scalar_string( $row['game'] ?? '' ) ) . '</td>';
+        echo '<td>' . scp_admin_badge( $type, $type ) . '</td>';
+        echo '<td>$' . esc_html( number_format( (float) ( $row['amount'] ?? 0 ), 2 ) ) . '</td>';
+        echo '<td>$' . esc_html( number_format( (float) ( $row['preBalance'] ?? 0 ), 2 ) ) . '</td>';
+        echo '<td>$' . esc_html( number_format( (float) ( $row['currentBalance'] ?? 0 ), 2 ) ) . '</td>';
+        echo '<td>' . scp_admin_badge( $status, $status ) . '</td>';
+        echo '<td>' . esc_html( scp_admin_format_datetime( $row['createdAt'] ?? '' ) ) . '</td>';
+        echo '</tr>';
+    }
+
+    echo '</tbody></table>';
+    scp_admin_log_pagination( $total, $offset, $filters['limit'] );
 }
 
 function scp_withdrawals_page() {
@@ -784,11 +1302,13 @@ function scp_balance_page() {
             $res = $api->withdraw( $player_login, $amount, 'USD', $tx_id );
         }
 
-        if ( $res['success'] ) {
-            scp_add_transaction( $user_id, $player_login, $action, $amount, 'USD', 'completed', '', $res['data']['transaction_id'] ?? '', $res );
+        if ( is_array( $res ) && ! empty( $res['success'] ) ) {
+            $data = is_array( $res['data'] ?? null ) ? $res['data'] : array();
+            scp_add_transaction( $user_id, $player_login, $action, $amount, 'USD', 'completed', '', $data['transaction_id'] ?? '', $res );
             echo '<div class="notice notice-success"><p>Balance updated.</p></div>';
         } else {
-            echo '<div class="notice notice-error"><p>Error: ' . esc_html( $res['message'] ) . '</p></div>';
+            $message = is_array( $res ) ? ( $res['message'] ?? 'Unknown error' ) : 'Unknown error';
+            echo '<div class="notice notice-error"><p>Error: ' . esc_html( $message ) . '</p></div>';
         }
     }
     ?>

@@ -6,39 +6,54 @@ class SCP_API_Client {
     private $player_token; // can be set per request
 
     public function __construct() {
-        $this->base_url = get_option( 'scp_api_base_url', '' );
-        $this->api_key = get_option( 'scp_api_key', '' );
+        $this->base_url = untrailingslashit( (string) get_option( 'scp_api_base_url', '' ) ) ?: $this->base_url;
+        $saved_key      = (string) get_option( 'scp_api_key', '' );
+        $this->api_key  = $saved_key !== '' ? $saved_key : $this->api_key;
     }
 
     public function request( $endpoint, $method = 'POST', $body = array(), $extra_headers = array() ) {
-        $url  = $this->base_url . $endpoint;
+        $method  = strtoupper( $method );
+        $url     = $this->base_url . $endpoint;
+        $headers = array(
+            'Authorization' => 'Bearer ' . $this->api_key,
+            'Accept'        => 'application/json',
+        );
+        if ( in_array( $method, array( 'POST', 'PUT', 'PATCH' ), true ) ) {
+            $headers['Content-Type'] = 'application/json';
+        }
+
         $args = array(
             'method'  => $method,
-            'headers' => array_merge( array(
-                'Authorization' => 'Bearer ' . $this->api_key,
-                'Content-Type'  => 'application/json',
-            ), $extra_headers ),
+            'headers' => array_merge( $headers, $extra_headers ),
             'timeout' => 30,
         );
 
-        if ( ! empty( $body ) && in_array( $method, array('POST', 'PUT', 'PATCH') ) ) {
-            $args['body'] = json_encode( $body );
+        if ( ! empty( $body ) && $method === 'GET' ) {
+            $url = $url . ( strpos( $url, '?' ) === false ? '?' : '&' ) . http_build_query( $body, '', '&', PHP_QUERY_RFC3986 );
+        } elseif ( ! empty( $body ) && in_array( $method, array( 'POST', 'PUT', 'PATCH' ), true ) ) {
+            $args['body'] = wp_json_encode( $body );
         }
 
         $response = wp_remote_request( $url, $args );
 
         if ( is_wp_error( $response ) ) {
             $this->log_error( 'API Request Error', $response->get_error_message() );
-            return [ 'success' => false, 'message' => $response->get_error_message() ];
+            return array( 'success' => false, 'message' => $response->get_error_message() );
         }
 
-        $status = wp_remote_retrieve_response_code( $response );
-        $body   = json_decode( wp_remote_retrieve_body( $response ), true );
+        $status = (int) wp_remote_retrieve_response_code( $response );
+        $raw    = wp_remote_retrieve_body( $response );
+        $parsed = json_decode( $raw, true );
+        $body   = is_array( $parsed ) ? $parsed : array();
 
         if ( $status >= 400 ) {
-            $msg = isset( $body['message'] ) ? $body['message'] : 'Unknown API error';
+            $msg = $this->extract_error_message( $body, $status, $raw );
             $this->log_error( "API Error $status", $msg, $body );
-            return [ 'success' => false, 'status' => $status, 'message' => $msg, 'data' => $body ];
+            return array( 'success' => false, 'status' => $status, 'message' => $msg, 'data' => $body );
+        }
+
+        if ( ! array_key_exists( 'success', $body ) ) {
+            $body['success'] = true;
         }
 
         return $body;
@@ -72,7 +87,8 @@ class SCP_API_Client {
 
         $meta['api'] = $response;
         $status      = ! empty( $response['success'] ) ? 'completed' : 'failed';
-        $scp_txn_id  = $response['data']['transaction_id'] ?? $response['data']['transactionId'] ?? '';
+        $data        = is_array( $response['data'] ?? null ) ? $response['data'] : array();
+        $scp_txn_id  = $data['transaction_id'] ?? $data['transactionId'] ?? '';
 
         scp_log_transaction( $txn_id, $userId, $type, $amount, $currency, $status, $meta, '', $scp_txn_id );
 
@@ -131,12 +147,35 @@ class SCP_API_Client {
         return $this->request( '/v1/wallet/transactions', 'GET', [], [ 'playerExternalId' => $playerExternalId ] );
     }
 
-    public function transaction_list( $playerExternalId = '' ) {
-        $endpoint = '/v1/transaction/list';
-        if ( ! empty( $playerExternalId ) ) {
-            $endpoint .= '?playerExternalId=' . rawurlencode( $playerExternalId );
+    /**
+     * GET /v1/transaction/list — startTime, endTime, offset, and limit are required by the API.
+     *
+     * @param array $params {
+     *     @type string $startTime
+     *     @type string $endTime
+     *     @type int    $offset
+     *     @type int    $limit
+     *     @type string $playerExternalId
+     *     @type string $roundId
+     *     @type string $transType
+     *     @type string $operator
+     * }
+     */
+    public function transaction_list( $params = array() ) {
+        if ( ! is_array( $params ) ) {
+            $params = array( 'playerExternalId' => (string) $params );
         }
-        return $this->request( $endpoint, 'GET' );
+
+        $query = array();
+        foreach ( $params as $key => $value ) {
+            if ( $value === null || $value === '' ) {
+                continue;
+            }
+            $query[ $key ] = is_bool( $value ) ? ( $value ? 'true' : 'false' ) : (string) $value;
+        }
+
+        $qs = http_build_query( $query, '', '&', PHP_QUERY_RFC3986 );
+        return $this->request( '/v1/transaction/list?' . $qs, 'GET' );
     }
 
     public function support_contact( $playerExternalId, $subject, $message, $email = '' ) {
@@ -156,6 +195,36 @@ class SCP_API_Client {
      */
     public function test_connection() {
         return $this->request( 'auth/test', 'GET' ); // adjust to your API
+    }
+
+    private function extract_error_message( $body, $status, $raw = '' ) {
+        foreach ( array( 'message', 'error', 'errorMessage', 'msg', 'detail' ) as $key ) {
+            if ( ! isset( $body[ $key ] ) || $body[ $key ] === '' ) {
+                continue;
+            }
+            if ( is_array( $body[ $key ] ) ) {
+                $parts = array();
+                array_walk_recursive( $body[ $key ], function( $item ) use ( &$parts ) {
+                    if ( is_scalar( $item ) && $item !== '' ) {
+                        $parts[] = (string) $item;
+                    }
+                } );
+                if ( $parts ) {
+                    return implode( '; ', $parts );
+                }
+                continue;
+            }
+            if ( is_scalar( $body[ $key ] ) ) {
+                return (string) $body[ $key ];
+            }
+        }
+
+        if ( $status ) {
+            return 'Scorpio API HTTP ' . $status;
+        }
+
+        $raw = trim( wp_strip_all_tags( (string) $raw ) );
+        return $raw !== '' ? substr( $raw, 0, 180 ) : 'Unknown API error';
     }
 
     private function log_error( $type, $message, $data = null ) {
