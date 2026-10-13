@@ -138,6 +138,7 @@ function scp_register_rest_routes() {
             'destination'  => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
             'from'         => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
             'network'      => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+            'bank'         => [ 'required' => false, 'sanitize_callback' => 'scp_rest_sanitize_bank' ],
         ],
     ] );
 
@@ -229,6 +230,22 @@ function scp_register_rest_routes() {
  */
 function scp_rest_sanitize_float( $value, $request = null, $param = '' ) {
     return (float) $value;
+}
+
+function scp_rest_sanitize_bank( $value, $request = null, $param = '' ) {
+    if ( ! is_array( $value ) ) {
+        return array();
+    }
+
+    $allowed = array( 'bankId', 'bankName', 'accountName', 'accountNumber', 'reference' );
+    $out     = array();
+    foreach ( $allowed as $key ) {
+        if ( isset( $value[ $key ] ) && ! is_array( $value[ $key ] ) ) {
+            $out[ $key ] = sanitize_text_field( (string) $value[ $key ] );
+        }
+    }
+
+    return $out;
 }
 
 function scp_rest_sanitize_destination( $value, $request = null, $param = '' ) {
@@ -908,6 +925,191 @@ function scp_rest_game_kick( $request ) {
     return rest_ensure_response( $result['data'] ?? [ 'message' => 'Game kicked successfully.' ] );
 }
 
+function scp_rest_bank_account_number( $value ) {
+    return strtoupper( preg_replace( '/[^A-Za-z0-9]/', '', (string) $value ) );
+}
+
+function scp_rest_bank_reference( $value ) {
+    $reference = strtoupper( preg_replace( '/[^A-Za-z0-9]/', '', (string) $value ) );
+    if ( strlen( $reference ) < 4 || strlen( $reference ) > 32 ) {
+        return '';
+    }
+    return $reference;
+}
+
+function scp_rest_submit_bank_deposit( $user, $user_id, $player_id, $amount, $currency, $order_id, $request ) {
+    $destinations = function_exists( 'scp_get_deposit_destinations' ) ? scp_get_deposit_destinations() : array();
+    $bank_dest    = isset( $destinations['bank'] ) && is_array( $destinations['bank'] ) ? $destinations['bank'] : array();
+
+    if ( empty( $bank_dest['enabled'] ) ) {
+        return new WP_Error( 'scp_wallet_deposit_bank_disabled', 'Bank deposits are not available.', array( 'status' => 400 ) );
+    }
+
+    $receive_number = scp_rest_bank_account_number( $bank_dest['account_number'] ?? '' );
+    if ( $receive_number === '' ) {
+        return new WP_Error( 'scp_wallet_deposit_bank_unconfigured', 'Bank deposit details are not configured yet.', array( 'status' => 400 ) );
+    }
+
+    $bank = $request->get_param( 'bank' );
+    if ( ! is_array( $bank ) || empty( $bank ) ) {
+        $json = $request->get_json_params();
+        $bank = ( is_array( $json ) && isset( $json['bank'] ) && is_array( $json['bank'] ) ) ? $json['bank'] : array();
+    }
+
+    $sender_name   = sanitize_text_field( $bank['accountName'] ?? '' );
+    $sender_number = scp_rest_bank_account_number( $bank['accountNumber'] ?? '' );
+    $sender_bank   = sanitize_text_field( $bank['bankName'] ?? '' );
+    $reference     = scp_rest_bank_reference( $bank['reference'] ?? '' );
+
+    if ( $sender_bank === '' ) {
+        $sender_bank = 'Khan Bank';
+    }
+    if ( $sender_name === '' || strlen( $sender_number ) < 6 ) {
+        return new WP_Error(
+            'scp_wallet_deposit_bank_sender',
+            'Enter the account name and number you sent the transfer from.',
+            array( 'status' => 400 )
+        );
+    }
+    if ( $reference === '' ) {
+        return new WP_Error(
+            'scp_wallet_deposit_bank_reference',
+            'A transfer description between 4 and 32 letters or numbers is required.',
+            array( 'status' => 400 )
+        );
+    }
+
+    $existing = scp_get_transaction_by_gateway_id( $reference );
+    if ( $existing ) {
+        return new WP_Error( 'scp_wallet_deposit_duplicate', 'This transfer description was already used.', array( 'status' => 409 ) );
+    }
+
+    $meta = array(
+        'method'               => 'bank',
+        'payment_method'       => 'bank',
+        'bankName'             => (string) ( $bank_dest['bank_name'] ?? 'Khan Bank' ),
+        'accountHolder'        => (string) ( $bank_dest['account_holder'] ?? '' ),
+        'accountNumber'        => $receive_number,
+        'senderBank'           => $sender_bank,
+        'senderAccountName'    => $sender_name,
+        'senderAccountNumber'  => $sender_number,
+        'reference'            => $reference,
+    );
+
+    scp_log_transaction( $order_id, $player_id, 'deposit', $amount, $currency, 'pending', $meta, $reference );
+
+    $balance_result  = scp_fetch_player_balance_payload( $player_id, $currency );
+    $balance_payload = ! empty( $balance_result['success'] ) ? $balance_result['data'] : null;
+    $user_payload    = $user
+        ? scp_auth_user_payload( $user, $balance_payload )
+        : array(
+            'id'           => (string) $user_id,
+            'email'        => '',
+            'displayName'  => $player_id,
+            'username'     => $player_id,
+            'avatarUrl'    => '',
+            'balanceCents' => 0,
+            'currency'     => $currency,
+            'ownedGameIds' => array(),
+            'createdAt'    => current_time( 'c' ),
+        );
+
+    $amount_cents = (int) round( $amount * 100 );
+
+    return rest_ensure_response( array(
+        'user'        => $user_payload,
+        'transaction' => array(
+            'id'          => $order_id,
+            'userId'      => $user ? (string) $user->ID : (string) $user_id,
+            'amountCents' => $amount_cents,
+            'priceCents'  => $amount_cents,
+            'currency'    => $currency,
+            'method'      => 'bank',
+            'status'      => 'pending',
+            'createdAt'   => current_time( 'c' ),
+            'reference'   => $reference,
+            'txn_id'      => $order_id,
+        ),
+    ) );
+}
+
+function scp_rest_submit_bank_withdraw( $user_id, $player_id, $amount, $currency, $withdrawal_id, $destination ) {
+    $destinations = function_exists( 'scp_get_deposit_destinations' ) ? scp_get_deposit_destinations() : array();
+    if ( empty( $destinations['bank']['enabled'] ) ) {
+        return new WP_Error( 'scp_wallet_withdraw_bank_disabled', 'Bank withdrawals are not available.', array( 'status' => 400 ) );
+    }
+
+    $destination   = is_array( $destination ) ? $destination : array();
+    $account_name  = sanitize_text_field( $destination['accountName'] ?? '' );
+    $account_number = scp_rest_bank_account_number( $destination['accountNumber'] ?? '' );
+    $bank_name     = sanitize_text_field( $destination['bankName'] ?? '' );
+    $currency      = strtoupper( sanitize_text_field( $currency ) ) ?: 'USD';
+
+    if ( $bank_name === '' ) {
+        $bank_name = 'Khan Bank';
+    }
+    if ( $account_name === '' || strlen( $account_number ) < 6 ) {
+        return new WP_Error(
+            'scp_wallet_withdraw_bank_destination',
+            'Enter the account name, account number, and bank for the payout.',
+            array( 'status' => 400 )
+        );
+    }
+
+    $balance_result = scp_fetch_player_balance_payload( $player_id, $currency );
+    if ( empty( $balance_result['success'] ) ) {
+        return new WP_Error(
+            'scp_wallet_withdraw_balance',
+            $balance_result['message'] ?? 'Unable to check your balance.',
+            array( 'status' => 500 )
+        );
+    }
+
+    $balance_payload = $balance_result['data'];
+    $wallet_currency = strtoupper( (string) ( $balance_payload['currency'] ?? 'USD' ) );
+    if ( $currency !== $wallet_currency ) {
+        return new WP_Error(
+            'scp_wallet_withdraw_currency',
+            'Withdraw bank payouts in ' . $wallet_currency . '.',
+            array( 'status' => 400 )
+        );
+    }
+
+    $available = ( (int) ( $balance_payload['balanceCents'] ?? 0 ) ) / 100;
+    $reserved  = function_exists( 'scp_sum_pending_wallet_amount' )
+        ? scp_sum_pending_wallet_amount( $user_id, 'withdraw' )
+        : 0.0;
+    if ( ( $amount + $reserved ) > ( $available + 0.0001 ) ) {
+        return new WP_Error(
+            'scp_wallet_withdraw_insufficient',
+            'Amount exceeds your available balance, including pending withdrawals.',
+            array( 'status' => 400 )
+        );
+    }
+
+    $meta = array(
+        'method'        => 'bank',
+        'payment_method'=> 'bank',
+        'bankName'      => $bank_name,
+        'accountName'   => $account_name,
+        'accountNumber' => $account_number,
+        'reference'     => $withdrawal_id,
+    );
+
+    scp_log_transaction( $withdrawal_id, $player_id, 'withdraw', $amount, $currency, 'pending', $meta, $withdrawal_id );
+
+    return rest_ensure_response( array(
+        'currency'       => $currency,
+        'balance'        => $available,
+        'amount'         => $amount,
+        'withdrawAmount' => $amount,
+        'status'         => 'pending',
+        'txn_id'         => $withdrawal_id,
+        'reference'      => $withdrawal_id,
+        'method'         => 'bank',
+    ) );
+}
+
 function scp_rest_resolve_deposit_amount( $request ) {
     $amount = floatval( $request->get_param( 'amount' ) );
     if ( $amount > 0 ) {
@@ -945,6 +1147,16 @@ function scp_rest_wallet_deposit( $request ) {
     $method   = strtolower( sanitize_text_field( $request->get_param( 'method' ) ?: 'card' ) );
     if ( ! in_array( $method, [ 'bank', 'card', 'paypal', 'crypto' ], true ) ) {
         $method = 'card';
+    }
+
+    if ( $method === 'bank' ) {
+        if ( $amount <= 0 ) {
+            return new WP_Error( 'scp_wallet_deposit_invalid_amount', 'Deposit amount must be greater than zero.', array( 'status' => 400 ) );
+        }
+        if ( empty( $order_id ) ) {
+            $order_id = 'deposit_' . ( $user_id ?: $player_id ) . '_' . time() . '_' . wp_rand( 100, 999 );
+        }
+        return scp_rest_submit_bank_deposit( $user, $user_id, $player_id, $amount, $currency, $order_id, $request );
     }
 
     $tx_hash     = sanitize_text_field( scp_rest_first_param( $request, [ 'txHash', 'tx_hash' ] ) );
@@ -1165,7 +1377,11 @@ function scp_rest_wallet_withdraw( $request ) {
     }
 
     if ( empty( $withdrawal_id ) ) {
-        $withdrawal_id = 'withdraw_' . ( $user_id ?: $player_id ) . '_' . time();
+        $withdrawal_id = 'withdraw_' . ( $user_id ?: $player_id ) . '_' . time() . '_' . wp_rand( 100, 999 );
+    }
+
+    if ( $method === 'bank' ) {
+        return scp_rest_submit_bank_withdraw( $user_id, $player_id, $amount, $currency, $withdrawal_id, $dest_info['raw'] );
     }
 
     $tx_hash = '';

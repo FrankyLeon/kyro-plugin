@@ -725,10 +725,23 @@ function scp_format_wallet_details( $meta ) {
     if ( $method !== '' ) {
         $parts[] = strtoupper( $method );
     }
-    foreach ( array( 'bankName', 'accountNumber', 'destination', 'paypalEmail', 'txHash' ) as $key ) {
+    $labeled = array(
+        'bankName'             => 'To',
+        'accountHolder'        => 'Holder',
+        'reference'            => 'Ref',
+        'senderBank'           => 'From bank',
+        'senderAccountName'    => 'From name',
+        'senderAccountNumber'  => 'From account',
+        'accountName'          => 'Name',
+        'accountNumber'        => 'Account',
+        'destination'          => 'To account',
+        'paypalEmail'          => 'PayPal',
+        'txHash'               => 'Tx',
+    );
+    foreach ( $labeled as $key => $label ) {
         $value = scp_scalar_string( $meta[ $key ] ?? '' );
         if ( $value !== '' ) {
-            $parts[] = $value;
+            $parts[] = $label . ' ' . $value;
         }
     }
     $from = scp_scalar_string( $meta['from'] ?? '' );
@@ -1071,6 +1084,21 @@ function scp_summarize_wallet_transactions( $args = array() ) {
     }
 
     return $stats;
+}
+
+function scp_sum_pending_wallet_amount( $wp_user_id, $type ) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'scp_transactions';
+    $types = scp_wallet_request_types( $type );
+    if ( empty( $types ) || $wp_user_id <= 0 ) {
+        return 0.0;
+    }
+
+    $placeholders = implode( ',', array_fill( 0, count( $types ), '%s' ) );
+    $sql          = "SELECT COALESCE(SUM(amount), 0) FROM $table WHERE user_id = %d AND status = 'pending' AND type IN ($placeholders)";
+    $params       = array_merge( array( absint( $wp_user_id ) ), $types );
+
+    return (float) $wpdb->get_var( $wpdb->prepare( $sql, $params ) );
 }
 
 function scp_get_pending_wallet_requests( $type ) {
